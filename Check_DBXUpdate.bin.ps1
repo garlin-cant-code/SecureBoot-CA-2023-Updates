@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2025.12.31
+.VERSION 2026.01.03
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2025.12.31'
+$ScriptVersion = '2026.01.03'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -71,7 +71,7 @@ $DBXinfo_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/m
 $Tab4 = ' ' * 4
 
 if ($Version) {
-    '{0} (version {1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
+    '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
     exit 0
 }
 

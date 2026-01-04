@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2025.12.31
+.VERSION 2026.01.03
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2025.12.31'
+$ScriptVersion = '2026.01.03'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -86,16 +86,16 @@ $EFI_WDSMGR_DBXSVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 
 $VMWARE_GUID = 'a3d5e95b-0a8f-4753-8735-445afb708f62'
 
-$KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
+$CN_Regex = '(CN=)([^,]+)'
 
-$CN_Regex = '(CN=)((\w|\s|-|\?)+)(,(.+))'
+$KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
 
 $Tab4 = ' ' * 4
 $Tab8 = ' ' * 8
 $Tab12 = ' ' * 12
 
 if ($Version) {
-    '{0} (version {1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
+    '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
     exit 0
 }
 
@@ -627,33 +627,33 @@ function Validate-PFXCert {
     }
 }
 
-function Confirm-MininumUBR {
+function Confirm-MinimumUBR {
     $Build = $CurrentVersion.CurrentBuildNumber
     $UBR = $CurrentVersion.UBR
     $Release = $CurrentVersion.DisplayVersion
 
     switch ($Build) {
         { $_ -in 19044,19045 } {
-            if ($UBR -lt 4651) {
-                return "Update W10 $Release to KB5040427 (July 2025) or later"
+            if ($UBR -lt 6456) {
+                return "Update W10 $Release to KB5066791 (Oct 2025) or later"
             }
         }
 
         22000 {
-            if ($UBR -lt 3079) {
-                return "Update W11 21H2 to KB5040431 (July 2025) or later"
+            if ($UBR -lt 3260) {
+                return "Update W11 21H2 to KB5044280 (Oct 2025) or later"
             }
         }
 
         { $_ -in 22621,22631 } {
-            if ($UBR -lt 5624) {
-                return "Update W11 $Release to KB5062552 (July 2025) or later"
+            if ($UBR -lt 6060) {
+                return "Update W11 $Release to KB5066793 (Oct 2025) or later"
             }
         }
 
         { $_ -in 26100,26200 } {
-            if ($UBR -lt 4652) {
-                return "Update W11 $Release to KB5062553 (July 2025) or later"
+            if ($UBR -lt 6899) {
+                return "Update W11 $Release to KB5066835 (Oct 2025) or later"
             }
         }
 
@@ -670,11 +670,11 @@ function Audit-UEFI {
     $index = 1
     $script:UpdateFlags = $script:RevokeFlags = 0
 
-    $Result = Confirm-MininumUBR
+    $Result = Confirm-MinimumUBR
 
     if ($Result -ne $true) {
         $CheckList += "{0,-3} {1}`n" -f ('{0}.' -f $index++), $Result
-        $NotMininumUBR = $true
+        $NotMinimumUBR = $true
     }
 
     if (-not $SetupMode -or -not (Confirm-SecureBootUEFI)) {
@@ -732,27 +732,27 @@ function Audit-UEFI {
         $script:RevokeFlags = $script:RevokeFlags -bor 0x200
     }
 
-    $BootMgr_File_SHA256 = (Get-FileHash -LiteralPath $BootMgr_File -Algorithm SHA256).Hash
-    $BootMgrEX_File_SHA256 = (Get-FileHash $BootMgrEX_File -Algorithm SHA256).Hash
+    $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
+    $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
 
-    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-WindowsUpdate_DBXSVN) -gt $UEFI_DBXSVN) -and ($BootMgr_File_SHA256 -ne $BootMgrEX_File_SHA256)) {
+    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-WindowsUpdate_DBXSVN) -gt $UEFI_DBXSVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
         $script:UpdateFlags = $script:UpdateFlags -bor 0x100
     }
 
     if ($VBS_Enabled) {
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
-            $SkuSiPolicy_File_SHA256 = (Get-FileHash $SkuSiPolicy_File -Algorithm SHA256).Hash
-            $EFI_SkuSiPolicy_File_SHA256 = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File -Algorithm SHA256).Hash
+            $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
+            $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
 
-            if ($EFI_SkuSiPolicy_File_SHA256 -ne $SkuSiPolicy_File_SHA256) {
+            if ($EFI_SkuSiPolicy_File_Hash -ne $SkuSiPolicy_File_Hash) {
                 $CheckList += "{0,-3} SkuSiPolicy.p7b (for VBS) is not updated`n" -f ('{0}.' -f $index++)
-                $script:RevokeFlags = $script:RevokeFlags -bor 0x20
+                $script:UpdateSkuSiPolicy = $true
             }
         }
         else {
             $CheckList += "{0,-3} SkuSiPolicy.p7b (for VBS) is missing`n" -f ('{0}.' -f $index++)
-            $script:RevokeFlags = $script:RevokeFlags -bor 0x20
+            $script:UpdateSkuSiPolicy = $true
         }
     }
 
@@ -831,10 +831,10 @@ function Check-BootMedia {
                 '{0}Boot File [{1}] {2} BANNED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
             }
             else {
-                $BootMgrEX_File_SHA256 = (Get-FileHash $BootMgrEX_File -Algorithm SHA256).Hash
-                $EFI_BootFile_SHA256 = (Get-FileHash -LiteralPath $EFI_BootFile -Algorithm SHA256).Hash
+                $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
+                $EFI_BootFile_Hash = (Get-FileHash -LiteralPath $EFI_BootFile).Hash
 
-                if ($UEFI_DBXSVN -and ($EFI_BootFile_SHA256 -ne $BootMgrEX_File_SHA256)) {
+                if ($UEFI_DBXSVN -and ($EFI_BootFile_Hash -ne $BootMgrEX_File_Hash)) {
                     '{0}Boot File [{1}] {2} BANNED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
                 }
                 else {
@@ -1006,7 +1006,7 @@ $ScriptBlock = {
         exit 1
     }
 
-    if ($db_Certs.Count -eq 0 -and $dbx_Certs.Count -eq 0 -and $KEK_Certs.Count -eq 0 -and $PK_Cert.Count -eq 0) {
+    if ($db_Certs.Count -eq 0 -and $dbx_Certs.Count -eq 0 -and $KEK_Certs.Count -eq 0 -and $PK_Cert.Count -eq 0) { 
         if (-not $Verbose) {
             "`nUEFI is in Setup Mode (NO CERTS)."
         }
@@ -1121,10 +1121,10 @@ $ScriptBlock = {
         '{0}Disk {1}: Windows Boot Manager [{2}] {3} BANNED.' -f $Tab4, $SystemDisk, ($PFXCert -replace 'Microsoft Windows '), $Verb
     }
     else {
-        $BootMgrEX_File_SHA256 = (Get-FileHash $BootMgrEX_File -Algorithm SHA256).Hash
-        $BootMgr_File_SHA256 = (Get-FileHash -LiteralPath $BootMgr_File -Algorithm SHA256).Hash
+        $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
+        $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-        if ($UEFI_DBXSVN -and ($BootMgr_File_SHA256 -ne $BootMgrEX_File_SHA256)) {
+        if ($UEFI_DBXSVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
             '{0}Disk {1}: Windows Boot Manager [{2}] {3} BANNED.' -f $Tab4, $SystemDisk, ($PFXCert -replace 'Microsoft Windows '), $Verb
         }
         else {
@@ -1151,10 +1151,10 @@ $ScriptBlock = {
 
     if ($VBS_Enabled) {
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
-            $SkuSiPolicy_File_SHA256 = (Get-FileHash $SkuSiPolicy_File -Algorithm SHA256).Hash
-            $EFI_SkuSiPolicy_File_SHA256 = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File -Algorithm SHA256).Hash
+            $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
+            $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
 
-            if ($EFI_SkuSiPolicy_File_SHA256 -eq $SkuSiPolicy_File_SHA256) {
+            if ($EFI_SkuSiPolicy_File_Hash -eq $SkuSiPolicy_File_Hash) {
                 "`n{0}Disk {1}: SkuSiPolicy.p7b (for VBS) is CURRENT." -f $Tab4, $SystemDisk
             }
             else {
@@ -1191,21 +1191,16 @@ $ScriptBlock = {
         }
     }
 
-    switch ($RevokeFlags) {
-        0x20 {
-            $RevokeMessage = 'To install SkuSiPolicy.p7b'
+    if ($RevokeFlags) {
+        if ($UpdateFlags) {
+            $RevokeMessage = 'To install [UEFI CA 2023] certs and REVOKE the [PCA 2011] cert'
         }
-        default {
-            if ($UpdateFlags) {
-                $RevokeMessage = 'To install [UEFI CA 2023] certs and REVOKE the [PCA 2011] cert'
-            }
-            else {
-                $RevokeMessage = 'To revoke the [PCA 2011] cert, run the commands'
-            }
+        else {
+            $RevokeMessage = 'To revoke the [PCA 2011] cert, run the commands'
         }
     }
 
-    if ($UpdateFlags -or $RevokeFlags) {
+    if ($UpdateFlags -or $RevokeFlags -or $UpdateSkuSiPolicy) {
         if ($BitLocker_Enabled -and $UpdateFlags -ne 0x100) {
             $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
 
@@ -1273,6 +1268,12 @@ $ScriptBlock = {
                 '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
                 '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
             }
+
+            if ($UpdateSkuSiPolicy) {
+                "`nTo install SkuSiPolicy.p7b, run the command:"
+                '{0}Update_UEFI-CA2023.ps1 -SkuSiPolicy' -f $Tab4
+            }
+
         }
         else {
             if (-not $SetupMode) {
