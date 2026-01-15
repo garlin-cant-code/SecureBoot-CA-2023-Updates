@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.01.03
+.VERSION 2026.01.14
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.01.03'
+$ScriptVersion = '2026.01.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -517,7 +517,17 @@ function Match-DBXSignatureData {
         return $true
     }
 
-    $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+    try {
+        $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+            return $false
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
 
     $RequiredSignatureData = $RequiredSignatures.SignatureList.SignatureData
     $RequiredCount = $RequiredSignatureData.Count
@@ -677,7 +687,7 @@ function Audit-UEFI {
         $NotMinimumUBR = $true
     }
 
-    if (-not $SetupMode -or -not (Confirm-SecureBootUEFI)) {
+    if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
         $CheckList += "{0,-3} Secure Boot is DISABLED`n" -f ('{0}.' -f $index++)
     }
 
@@ -716,7 +726,7 @@ function Audit-UEFI {
         $script:RevokeFlags = $script:RevokeFlags -bor 0x80
     }
 
-    if (-not $SetupMode -and -not (Match-DBXSignatureData "$env:SystemRoot\System32\SecureBootUpdates\dbxupdate.bin")) {
+    if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$env:SystemRoot\System32\SecureBootUpdates\dbxupdate.bin")) {
         $CheckList += "{0,-3} DBX Updates are missing from UEFI DBX`n" -f ('{0}.' -f $index++)
         $script:RevokeFlags = $script:RevokeFlags -bor 0x2
     }
@@ -989,6 +999,27 @@ $ScriptBlock = {
         '{0}Date: {1}' -f $Tab4, $BIOS_Date
     }
 
+    foreach ($Variable in 'PK','KEK','db','dbx') {
+        try {
+            $Count = (Get-SecureBootUEFI $Variable).Bytes.Count
+        }
+        catch {
+            if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+                $Count = 0
+            }
+        }
+
+        New-Variable -Name "${Variable}_BytesCount" -Value $Count
+    }
+
+    if ((((Get-SecureBootUEFI SetupMode).Bytes -Join '') -eq 1) -or ($PK_BytesCount -eq 0 -and $KEK_BytesCount -eq 0 -and $db_BytesCount -eq 0 -and $dbx_BytesCount -eq 0)) {
+        if (-not $Verbose) {
+            "`nUEFI is in Setup Mode (NO CERTS)"
+        }
+
+        $SetupMode = $true
+    }
+
     try {
         $PKDefault_Cert = Get-UEFICert PKDefault
         $KEKDefault_Certs = Get-UEFICert KEKDefault
@@ -1004,14 +1035,6 @@ $ScriptBlock = {
         Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -Foreground Red
         $_.Exception.Message
         exit 1
-    }
-
-    if ($db_Certs.Count -eq 0 -and $dbx_Certs.Count -eq 0 -and $KEK_Certs.Count -eq 0 -and $PK_Cert.Count -eq 0) { 
-        if (-not $Verbose) {
-            "`nUEFI is in Setup Mode (NO CERTS)."
-        }
-
-        $SetupMode = $true
     }
 
     $PK_Trusted = Check-TrustedPK
@@ -1091,10 +1114,10 @@ $ScriptBlock = {
 
     if ($Verbose) {
         if ($DBX_BootMgrSVN -eq $null) {
-            '{0}Windows BootMgr SVN is missing.' -f $Tab4
+            '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
         }
 
-        if (-not $SetupMode) {
+        if ($dbx_BytesCount -ne 0) {
             '{0}EFI_CERT_SHA256_GUID Signatures: {1}' -f $Tab4, (Get-SecureBootUEFI -Name dbx | Get-UEFIDatabaseSignatures | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }).SignatureList.Count
         }
         else {
@@ -1173,8 +1196,14 @@ $ScriptBlock = {
     $CheckList = Audit-UEFI
 
     if ($Audit) {
-        Print-Header "`nAUDIT REPORT" -Bold
-        $CheckList.TrimEnd("`n")
+        Print-Header -Bold "`nAUDIT REPORT"
+    
+        if ($CheckList -ne $null) {
+            $CheckList.TrimEnd("`n")
+        }
+        else {
+            Write-Output ''
+        }
     }
 
     switch ($UpdateFlags) {
@@ -1212,7 +1241,7 @@ $ScriptBlock = {
             }
         }
 
-        Print-Header "`nREQUIRED ACTION" -Bold
+        Print-Header -Bold "`nREQUIRED ACTION"
 
         if (('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) -and ('Windows UEFI CA 2023' -in $db_Certs)) {
             "`nRun the command:`n{0}Update_UEFI-CA2023.ps1{1}`n" -f $Tab4, $(if ($RevokeFlags) { ' -Revoke' })
