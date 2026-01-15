@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.01.03
+.VERSION 2026.01.14
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -98,7 +98,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.01.03'
+$ScriptVersion = '2026.01.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -504,7 +504,7 @@ function Audit-UEFI {
         $CheckList += "{0,-3} [Production PCA 2011] missing from UEFI DBX (DBXUpdate2024.bin)`n" -f ('{0}.' -f $index++)
     }
 
-    if (-not $SetupMode -and -not (Match-DBXSignatureData "$env:SystemRoot\System32\SecureBootUpdates\dbxupdate.bin")) {
+    if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$env:SystemRoot\System32\SecureBootUpdates\dbxupdate.bin")) {
         $CheckList += "{0,-3} DBX Updates are missing from UEFI DBX (dbxupdate.bin)`n" -f ('{0}.' -f $index++)
     }
 
@@ -519,7 +519,7 @@ function Audit-UEFI {
 
     $null = (Get-PfxCertificate -LiteralPath $BootMgr_File).Issuer -match $CN_Regex
     $PFXCert = $Matches[2]
-    
+
     $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
 
@@ -543,13 +543,7 @@ function Audit-UEFI {
         }
     }
 
-    Print-Header -Bold 'AUDIT REPORT'
-    if ($CheckList -eq $null) {
-        'No action is required.'
-    }
-    else {
-        $CheckList.TrimEnd("`n")
-    }
+    return $CheckList
 }
 
 function Download-EDK2bin {
@@ -578,7 +572,71 @@ function Download-EDK2bin {
     }
 }
 
+function Suspend-Bitlocker {
+    $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
+
+    if ($ProtectionStatus -eq 'On') {
+        $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
+
+        if ($DeviceGuard_Running -eq 1) {
+            'Suspending BitLocker for two reboots (Device Guard).'
+            $RebootCount = 3
+        }
+        else {
+            'Suspending BitLocker for one reboot.'
+            $RebootCount = 1
+        }
+
+        try {
+            $null = Suspend-Bitlocker -MountPoint $SystemDrive -RebootCount $RebootCount
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
+        }
+    }
+}
+
 function Set-SecureBootSignedFile {
+    param (
+        [Parameter(Mandatory)]
+        [ValidateSet('PKDefault','KEKDefault','dbDefault','dbxDefault','PK','KEK','db','dbx')]
+        [string]$Variable,
+
+        [Parameter(Mandatory)]
+        [string]$Filename
+    )
+
+    if (-not (Test-Path $Filename)) {
+        "$Filename not found."
+        exit 1
+    }
+
+    try {
+        # https://github.com/microsoft/secureboot_objects/blob/main/scripts/windows/InstallSecureBootKeys.ps1
+        $null = Set-SecureBootUEFI -Name $Variable -ContentFilePath $Filename -Time '2015-08-28T00:00:00Z'
+    }
+    catch {
+        $ErrorMessage = 'ERROR: Failed to write "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable.ToUpper()
+        Write-Host $ErrorMessage -Foreground Red
+
+        if ($_.Exception.Message -match 'Incorrect authentication') {
+            Write-Host 'Wrong signature for this UEFI variable.' -Foreground Red
+        }
+        else {
+            $_.Exception.Message
+        }
+
+        exit 1
+    }
+
+    'Successfully wrote "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable
+    $script:UEFI_Updated = $true
+
+    Suspend-Bitlocker
+}
+
+function Append-SecureBootSignedFile {
     <#
         .SYNOPSIS
         Appends a signed UEFI update package to an UEFI variable
@@ -595,7 +653,7 @@ function Set-SecureBootSignedFile {
         Specifies a signed UEFI update package.
 
         .EXAMPLE
-        Set-SecureBootSignedFile -Variable db -Filename ".\DBXUpdate-20230314.x64.bin"
+        Append-SecureBootSignedFile -Variable db -Filename ".\DBXUpdate-20230314.x64.bin"
     #>
 
     param (
@@ -655,33 +713,9 @@ function Set-SecureBootSignedFile {
         Set-Content -Encoding Byte -Path $ContentFile -Value ([Byte[]] $Bytes[($sig_length + 40)..($Bytes.Length - 1)]) -ErrorAction Stop
     }
 
-    $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
-
-    if ($ProtectionStatus -eq 'On') {
-        $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
-
-        if ($DeviceGuard_Running -eq 1) {
-            'Suspending BitLocker for two reboots (Device Guard).'
-            $RebootCount = 3
-        }
-        else {
-            'Suspending BitLocker for one reboot.'
-            $RebootCount = 1
-        }
-
-        try {
-            $null = Suspend-Bitlocker -MountPoint $SystemDrive -RebootCount $RebootCount
-        }
-        catch {
-            $_.Exception.Message
-            exit 1
-        }
-    }
-
     try {
         # https://github.com/microsoft/secureboot_objects/discussions/158
         $null = Set-SecureBootUEFI -Name $Variable -ContentFilePath $ContentFile -SignedFilePath $SigFile -Time '2010-03-06T19:17:21Z' -AppendWrite
-        'Successfully appended "{0}.bin" to UEFI {1}.' -f $CertName, $Variable.ToUpper()
     }
     catch {
         $ErrorMessage = 'ERROR: Failed to append "{0}.bin" to UEFI {1}.' -f $CertName, $Variable.ToUpper()
@@ -697,6 +731,10 @@ function Set-SecureBootSignedFile {
         exit 1
     }
 
+    'Successfully appended "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable.ToUpper()
+    $script:UEFI_Updated = $true
+
+    Suspend-Bitlocker
     Remove-Item $SigFile,$ContentFile -Force
 }
 
@@ -736,7 +774,17 @@ function Match-DBXSignatureData {
         return $true
     }
 
-    $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+    try {
+        $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+            return $false
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
 
     $RequiredSignatureData = $RequiredSignatures.SignatureList.SignatureData
     $RequiredCount = $RequiredSignatureData.Count
@@ -792,72 +840,32 @@ function Match-DBXSignatureData {
 }
 
 function Update-PK_Cert {
-    param (
-        [Parameter(Mandatory=$false)]
-        [bool]$PostSigned = $false
-    )
+    # Pre-signed object for Windows OEM Devices PK
 
-    if ($PostSigned) {
-        # Post-signed object for Windows OEM Devices PK
+    $CertFile = 'WindowsOEMDevicesPK.der'
+    $PreSignedObj_File = "$env:TEMP\$CertFile"
 
-        $ZIP_File = "$env:TEMP\edk2-secureboot-binaries.zip"
-
-        $CertFile = 'DefaultPk.bin'
-        $PostSignedObj_File = "$env:TEMP\$CertFile"
-
+    if (-not (Test-Path -LiteralPath "$EFI_FolderPath\$CertFile")) {
         try {
-            'Downloading "{0}" from GitHub.' -f ($EDK2bin_URL -split '/')[-1]
-            Invoke-WebRequest -UseBasicParsing -Uri $EDK2bin_URL -OutFile $ZIP_File
+            'Downloading "{0}" from GitHub.' -f $CertFile
+            Invoke-WebRequest -UseBasicParsing -Uri $PK_DER_URL -OutFile $PreSignedObj_File
         }
         catch {
             $_.Exception.Message
             exit 1
         }
 
-        $objShell = New-Object -ComObject 'Shell.Application'
-        $objFolder = $objShell.NameSpace("$env:TEMP")
-        $objFolder.CopyHere("$ZIP_File\LegacyFirmwareDefaults\Firmware\DefaultPk.bin", 0x14)
-
-        try {
-            $null = Set-SecureBootUEFI -Name PK -ContentFilePath $PostSignedObj_File -Time '2010-03-06T19:17:21Z'
-            'Successfully wrote "DefaultPk.bin" to UEFI PK.'
-        }
-        catch {
-            $_.Exception.Message
-            exit 1
+        if (-not (Test-Path -LiteralPath $EFI_FolderPath)) {
+            $null = New-Item -Path $EFI_FolderPath -Type Directory -Force
         }
 
-        Remove-Item $PostSignedObj_File,$ZIP_File -Force
-        $script:UEFI_Updated = $true
+        'Copying "{0}" to EFI.' -f $CertFile
+        Copy-Item -Path $PreSignedObj_File -Destination $EFI_FolderPath -Force
+
+        Remove-Item $PreSignedObj_File -Force
     }
-    else {
-        # Pre-signed object for Windows OEM Devices PK
 
-        $CertFile = 'WindowsOEMDevicesPK.der'
-        $PreSignedObj_File = "$env:TEMP\$CertFile"
-
-        if (-not (Test-Path -LiteralPath "$EFI_FolderPath\$CertFile")) {
-            try {
-                'Downloading "{0}" from GitHub.' -f $CertFile
-                Invoke-WebRequest -UseBasicParsing -Uri $PK_DER_URL -OutFile $PreSignedObj_File
-            }
-            catch {
-                $_.Exception.Message
-                exit 1
-            }
-
-            if (-not (Test-Path -LiteralPath $EFI_FolderPath)) {
-                $null = New-Item -Path $EFI_FolderPath -Type Directory -Force
-            }
-
-            'Copying "{0}" to EFI.' -f $CertFile
-            Copy-Item -Path $PreSignedObj_File -Destination $EFI_FolderPath -Force
-
-            Remove-Item $PreSignedObj_File -Force
-        }
-
-        $script:PK_README = $true
-    }
+    $script:PK_README = $true
 }
 
 function Update-KEK_Cert {
@@ -901,10 +909,9 @@ function Update-KEK_Cert {
             exit 1
         }
 
-        Set-SecureBootSignedFile -Variable KEK -Filename $PostSignedObj_File
+        Append-SecureBootSignedFile -Variable KEK -Filename $PostSignedObj_File
 
         Remove-Item $PostSignedObj_File -Force
-        $script:UEFI_Updated = $true
     }
     else {
         # Pre-signed object for KEK 2K CA 2023
@@ -984,6 +991,23 @@ $ScriptBlock = {
         $VBS_Enabled = $true
     }
 
+    foreach ($Variable in 'PK','KEK','db','dbx') {
+        try {
+            $Count = (Get-SecureBootUEFI $Variable).Bytes.Count
+        }
+        catch {
+            if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+                $Count = 0
+            }
+        }
+
+        New-Variable -Name "${Variable}_BytesCount" -Value $Count
+    }
+
+    if (((Get-SecureBootUEFI SetupMode).Bytes -Join '') -eq 1) {
+        $SetupMode = $true
+    }
+
     try {
         $PK_Cert = Get-UEFICert PK
         $KEK_Certs = Get-UEFICert KEK
@@ -993,10 +1017,6 @@ $ScriptBlock = {
     catch {
         Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -Foreground Red
         exit 1
-    }
-
-    if ($db_Certs.Count -eq 0 -and $dbx_Certs.Count -eq 0 -and $KEK_Certs.Count -eq 0 -and $PK_Cert.Count -eq 0) {
-        $SetupMode = $true
     }
 
     $PK_Trusted = Check-TrustedPK
@@ -1013,48 +1033,73 @@ $ScriptBlock = {
     $BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
     $EFI_SkuSiPolicy_File = "$EFI_Path\Microsoft\Boot\SkuSiPolicy.p7b"
 
+    $CheckList = Audit-UEFI
+
     if ($Audit) {
-        Audit-UEFI
+        Print-Header -Bold "`nAUDIT REPORT"
+
+        if ($CheckList -eq $null) {
+            'No action is required.'
+        }
+        else {
+            $CheckList.TrimEnd("`n")
+        }
+
         return
     }
 
-    if ($SetupMode) {
+    if ($PK_BytesCount -eq 0 -and ($KEK_BytesCount -eq 0 -or $db_BytesCount -eq 0 -or $dbx_BytesCount -eq 0)) {
         $EDK2_Folder = "$env:TEMP\EDK2_bin"
         Download-EDK2bin
 
-        $null = Set-SecureBootUEFI -Name db -ContentFilePath "$EDK2_Folder\Default3PDb.bin" -Time '2015-08-28T00:00:00Z'
-        'Successfully wrote "Default3PDb.bin" to UEFI DB.'
-        $UEFI_Updated = $true
+        if ($db_BytesCount -eq 0) {
+            Set-SecureBootSignedFile -Variable db -Filename "$EDK2_Folder\Default3PDb.bin"
+        }
 
-        $null = Set-SecureBootUEFI -Name dbx -ContentFilePath "$EDK2_Folder\DefaultDbx.bin" -Time '2015-08-28T00:00:00Z'
-        'Successfully wrote "DefaultDbx.bin" to UEFI DBX.'
-        $UEFI_Updated = $true
+        if ($dbx_BytesCount -eq 0) {
+            Set-SecureBootSignedFile -Variable dbx -Filename "$EDK2_Folder\DefaultDbx.bin"
+        }
 
-        $null = Set-SecureBootUEFI -Name KEK -ContentFilePath "$EDK2_Folder\DefaultKek.bin" -Time '2015-08-28T00:00:00Z'
-        'Successfully wrote "DefaultKek.bin" to UEFI KEK.'
-        $UEFI_Updated = $true
+        if ($KEK_BytesCount -eq 0) {
+            Set-SecureBootSignedFile -Variable KEK -Filename "$EDK2_Folder\DefaultKek.bin"
+        }
 
-        $null = Set-SecureBootUEFI -Name PK -ContentFilePath "$EDK2_Folder\DefaultPk.bin" -Time '2015-08-28T00:00:00Z'
-        'Successfully wrote "DefaultPk.bin" to UEFI PK.'
-        $UEFI_Updated = $true
+        if ($PK_BytesCount -eq 0) {
+            Set-SecureBootSignedFile -Variable PK -Filename "$EDK2_Folder\DefaultPk.bin"
+        }
+
+        try {
+            $PK_Cert = Get-UEFICert PK
+            $KEK_Certs = Get-UEFICert KEK
+            $db_Certs = Get-UEFICert db
+            $dbx_Certs = Get-UEFICert dbx
+        }
+        catch {
+            Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -Foreground Red
+            exit 1
+        }
 
         Remove-Item $EDK2_Folder -Recurse -Force
     }
-    else {
-        if ('Windows UEFI CA 2023' -notin $db_Certs) {
-            Set-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\dbupdate2024.bin"
-            $UEFI_Updated = $true
-        }
 
-        if ('Microsoft UEFI CA 2023' -notin $db_Certs) {
-            Set-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\DBUpdate3P2023.bin"
-            $UEFI_Updated = $true
-        }
+    if (-not $PK_Trusted) {
+        Update-PK_Cert
+    }
 
-        if ('Microsoft Option ROM UEFI CA 2023' -notin $db_Certs) {
-            Set-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\DBUpdateOROM2023.bin"
-            $UEFI_Updated = $true
-        }
+    if ('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) {
+        Update-KEK_Cert
+    }
+
+    if ('Windows UEFI CA 2023' -notin $db_Certs) {
+        Append-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\dbupdate2024.bin"
+    }
+
+    if ('Microsoft UEFI CA 2023' -notin $db_Certs) {
+        Append-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\DBUpdate3P2023.bin"
+    }
+
+    if ('Microsoft Option ROM UEFI CA 2023' -notin $db_Certs) {
+        Append-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\DBUpdateOROM2023.bin"
     }
 
     if ($Revoke) {
@@ -1085,21 +1130,19 @@ $ScriptBlock = {
         $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
 
         if (-not $(Match-DBXSignatureData $DBXUpdate_bin)) {
-            Set-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
-            $UEFI_Updated = $true
+            Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
         }
         elseif ($Latest) {
             '"dbxupdate.bin" is not a newer version of file.'
         }
 
         if ('Microsoft Windows Production PCA 2011' -notin (Get-UEFICert dbx)) {
-            Set-SecureBootSignedFile -Variable dbx -Filename "$UpdatesFolder\DBXUpdate2024.bin"
-            $UEFI_Updated = $true
+            Append-SecureBootSignedFile -Variable dbx -Filename "$UpdatesFolder\DBXUpdate2024.bin"
         }
 
         if ('Microsoft Windows Production PCA 2011' -in (Get-UEFICert dbx)) {
             if (-not $(Match-DBXSignatureData $DBXUpdateSVN_bin)) {
-                $Result = Set-SecureBootSignedFile -Variable dbx -Filename $DBXUpdateSVN_bin
+                $Result = Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdateSVN_bin
                 $SVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
 
                 $Result -replace ' to'," (SVN $SVN) to"
@@ -1143,19 +1186,6 @@ $ScriptBlock = {
         Remove-Item $DBXUpdate_bin,$DBXUpdateSVN_bin -Force
     }
 
-    if (-not $SetupMode) {
-        if ($PK_Cert.Count -eq 0) {
-            Update-PK_Cert -PostSigned:$true
-        }
-        elseif (-not $PK_Trusted) {
-            Update-PK_Cert
-        }
-
-        if ('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) {
-            Update-KEK_Cert
-        }
-    }
-
     $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
 
     if ('Windows UEFI CA 2023' -in (Get-UEFICert db)) {
@@ -1164,6 +1194,15 @@ $ScriptBlock = {
 
         if ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash) {
             'Copying EFI boot files.'
+
+            $RE_info = reagentc /info
+
+            if (($RE_info -match 'RE status:' -split ' ')[-1] -eq 'Enabled') {
+                $WinRE = $true
+
+                $WinRE_Path = ($RE_info -match 'RE location:' -split ' ')[-1]
+                $WinRE_GUID = ($RE_info -match 'identifier:' -split ' ')[-1]
+            }
 
             $EFI_DriveLetter = (& mountvol) -split "`n" | foreach { if ($_ -match '(.*mounted at )(.*)(\\)') { $Matches[2] } }
 
@@ -1176,9 +1215,9 @@ $ScriptBlock = {
                 }
 
                 try {
-                    & mountvol $EFI_DriveLetter /s
-                    & bcdboot $env:SystemRoot /f UEFI /s $EFI_DriveLetter /bootex /d
-                    & mountvol $EFI_DriveLetter /d
+                    Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
+                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+                    Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
                 }
                 catch {
                     $_.Exception.Message
@@ -1187,12 +1226,25 @@ $ScriptBlock = {
             }
             else {
                 try {
-                    & bcdboot $env:SystemRoot /f UEFI /s $EFI_DriveLetter /bootex /d
+                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
                 }
                 catch {
                     $_.Exception.Message
                     exit 1
                 }
+            }
+
+            if ($WinRE) {
+                try {
+                    Start-Process 'reagentc' -ArgumentList "/setreimage /path $WinRE_Path" -NoNewWindow -Wait
+                    Start-Process 'bcdedit' -ArgumentList "/set {default} recoverysequence {$WinRE_GUID}" -NoNewWindow -Wait
+                }
+                catch {
+                    $_.Exception.Message
+                    exit 1
+                }
+
+                $null = New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name Enable_WinRE -Value 'conhost --headless C:\Windows\System32\reagentc.exe /enable' -Force
             }
 
             $UEFI_Updated = $true
@@ -1227,7 +1279,7 @@ $ScriptBlock = {
 
                          try {
                              Copy-Item "${DriveLetter}:\EFI\Microsoft\Boot\BCD" $env:TEMP -Force
-                             & bcdboot $env:SystemRoot /f UEFI /s $DriveLetter /bootex
+                             Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /f UEFI /s $DriveLetter /bootex" -NoNewWindow -Wait
                              Copy-Item "$env:TEMP\BCD" "${DriveLetter}:\EFI\Microsoft\Boot\BCD" -Force
                              Remove-Item "$env:TEMP\BCD" -Force
                          }
@@ -1264,7 +1316,7 @@ $ScriptBlock = {
                     $CertName = '[KEK CA 2023] cert'
                 }
 
-                "Please follow the README.TXT instructions, for installing the {0} from BIOS.`n" -f $CertName
+                "Please follow the README_UEFI.TXT instructions, for installing the {0} from BIOS.`n" -f $CertName
             }
         }
 
