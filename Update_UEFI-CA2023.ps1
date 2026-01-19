@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.01.14
+.VERSION 2026.01.18
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -98,7 +98,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.01.14'
+$ScriptVersion = '2026.01.18'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -118,7 +118,7 @@ switch ($Arch) {
     'arm'   { $EDK2_Arch = 'arm' }
 }
 
-$EDK2bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/v1.6.1/edk2-${EDK2_Arch}-secureboot-binaries.zip"
+$EDK2bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/v1.6.2/edk2-${EDK2_Arch}-secureboot-binaries.zip"
 $PK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/PK/Certificate/WindowsOEMDevicesPK.der'
 
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
@@ -200,6 +200,7 @@ function Get-UefiDatabaseSignatures {
         Original Author: Matthew Graeber (@mattifestation)
         Modified By: Jeremiah Cox (@int0x6)
         Modified By: Joel Roth (@nafai)
+        Modified By: garlin (@garlin-cant-code)
         Additional Source: https://gist.github.com/mattifestation/991a0bea355ec1dc19402cef1b0e3b6f
         Additional Source: https://www.powershellgallery.com/packages/SplitDbxContent/1.0
         License: BSD 3-Clause
@@ -255,6 +256,8 @@ function Get-UefiDatabaseSignatures {
         $Filename
     )
 
+    $PSVersion = $PSVersionTable.PSVersion.Major
+
     $SignatureTypeMapping = @{
         'C1C41626-504C-4092-ACA9-41F936934328' = 'EFI_CERT_SHA256_GUID' # Most often used for dbx
         'A5C059A1-94E4-4AA7-87B5-AB155C2BF072' = 'EFI_CERT_X509_GUID'   # Most often used for db
@@ -264,7 +267,12 @@ function Get-UefiDatabaseSignatures {
 
     if ($Filename)
     {
-        $Bytes = Get-Content -Encoding Byte $Filename -ErrorAction Stop
+        if ($PSVersion -gt 5) {
+            $Bytes = Get-Content -AsByteStream $Filename -ErrorAction Stop
+        }
+        else {
+            $Bytes = Get-Content -Encoding Byte $Filename  -ErrorAction Stop
+        }
     }
     elseif ($Variable)
     {
@@ -329,7 +337,12 @@ function Get-UefiDatabaseSignatures {
                 }
 
                 'EFI_CERT_X509_GUID' {
-                    $SignatureData = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @(,([Byte[]] $SignatureDataBytes[16..($SignatureDataBytes.Count - 1)]))
+                    try {
+                        $SignatureData = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @(,([Byte[]] $SignatureDataBytes[16..($SignatureDataBytes.Count - 1)]))
+                    }
+                    catch {
+                        Write-Host "Skipping an invalid $Variable X509 certificate."
+                    }
                 }
             }
 
@@ -665,6 +678,8 @@ function Append-SecureBootSignedFile {
         [string]$Filename
     )
 
+    $PSVersion = $PSVersionTable.PSVersion.Major
+
     $CertName = (Split-Path $Filename -Leaf) -replace '.bin'
 
     if (-not (Test-Path $Filename)) {
@@ -672,10 +687,7 @@ function Append-SecureBootSignedFile {
         exit 1
     }
 
-    $PSVersion = $PSVersionTable.PSVersion.Major
-
-    # Get file from script input
-    if ($PSVersion -ge 6) {
+    if ($PSVersion -gt 5) {
         $Bytes = Get-Content -AsByteStream $Filename
     }
     else {

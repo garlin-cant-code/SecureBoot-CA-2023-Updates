@@ -1,6 +1,6 @@
 @echo off
 if %errorlevel% equ 0 (
-   pwsh -nop -ep bypass -f "%~dp0\Update_UEFI-CA2023.ps" %*
+   pwsh -nop -ep bypass -noexit -f "%~dp0\Update_UEFI-CA2023.ps1" %*
 ) else (
-   powershell -nop -ep bypass -f "%~dp0\Update_UEFI-CA2023.ps" %*
+   powershell -nop -ep bypass -noexit -f "%~dp0\Update_UEFI-CA2023.ps1" %*
 )

@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.01.14
+.VERSION 2026.01.18
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.01.14'
+$ScriptVersion = '2026.01.18'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -128,6 +128,7 @@ function Get-UefiDatabaseSignatures {
         Original Author: Matthew Graeber (@mattifestation)
         Modified By: Jeremiah Cox (@int0x6)
         Modified By: Joel Roth (@nafai)
+        Modified By: garlin (@garlin-cant-code)
         Additional Source: https://gist.github.com/mattifestation/991a0bea355ec1dc19402cef1b0e3b6f
         Additional Source: https://www.powershellgallery.com/packages/SplitDbxContent/1.0
         License: BSD 3-Clause
@@ -183,6 +184,8 @@ function Get-UefiDatabaseSignatures {
         $Filename
     )
 
+    $PSVersion = $PSVersionTable.PSVersion.Major
+
     $SignatureTypeMapping = @{
         'C1C41626-504C-4092-ACA9-41F936934328' = 'EFI_CERT_SHA256_GUID' # Most often used for dbx
         'A5C059A1-94E4-4AA7-87B5-AB155C2BF072' = 'EFI_CERT_X509_GUID'   # Most often used for db
@@ -192,7 +195,12 @@ function Get-UefiDatabaseSignatures {
 
     if ($Filename)
     {
-        $Bytes = Get-Content -Encoding Byte $Filename -ErrorAction Stop
+        if ($PSVersion -gt 5) {
+            $Bytes = Get-Content -AsByteStream $Filename -ErrorAction Stop
+        }
+        else {
+            $Bytes = Get-Content -Encoding Byte $Filename  -ErrorAction Stop
+        }
     }
     elseif ($Variable)
     {
@@ -257,7 +265,12 @@ function Get-UefiDatabaseSignatures {
                 }
 
                 'EFI_CERT_X509_GUID' {
-                    $SignatureData = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @(,([Byte[]] $SignatureDataBytes[16..($SignatureDataBytes.Count - 1)]))
+                    try {
+                        $SignatureData = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList @(,([Byte[]] $SignatureDataBytes[16..($SignatureDataBytes.Count - 1)]))
+                    }
+                    catch {
+                        Write-Host "Skipping an invalid $Variable X509 certificate."
+                    }
                 }
             }
 
