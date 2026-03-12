@@ -4,7 +4,7 @@
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
-.AUTHOR garlin
+.AUTHOR garlin, ungentilgarcon (@garlin-cant-code) (@ungentilgarcon)
 
 .COPYRIGHT
 
