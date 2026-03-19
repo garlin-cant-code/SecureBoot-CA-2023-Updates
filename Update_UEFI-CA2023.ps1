@@ -654,7 +654,7 @@ function Download-EDK2bin {
     }
 }
 
-function Suspend-Bitlocker {
+function Suspend-SystemBitLocker {
     $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
 
     if ($ProtectionStatus -eq 'On') {
@@ -670,7 +670,7 @@ function Suspend-Bitlocker {
         }
 
         try {
-            $null = Suspend-Bitlocker -MountPoint $SystemDrive -RebootCount $RebootCount
+            $null = Microsoft.BitLocker.Management\Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $RebootCount
         }
         catch {
             $_.Exception.Message
@@ -715,7 +715,7 @@ function Set-SecureBootSignedFile {
     'Successfully wrote "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable
     $script:UEFI_Updated = $true
 
-    Suspend-Bitlocker
+    Suspend-SystemBitLocker
 }
 
 function Append-SecureBootSignedFile {
@@ -815,7 +815,7 @@ function Append-SecureBootSignedFile {
     'Successfully appended "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable.ToUpper()
     $script:UEFI_Updated = $true
 
-    Suspend-Bitlocker
+    Suspend-SystemBitLocker
     Remove-Item $SigFile,$ContentFile -Force
 }
 
@@ -1195,9 +1195,9 @@ function Invoke-PreReqStaging {
 
     $SecureBootReg = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot'
     $null = New-Item -Path $SecureBootReg -Force
-    $null = New-ItemProperty -Path $SecureBootReg -Name 'AvailableUpdates' -PropertyType DWord -Value 0x5900 -Force
+    $null = New-ItemProperty -Path $SecureBootReg -Name 'AvailableUpdates' -PropertyType DWord -Value 0x5944 -Force
 
-    'Set registry: HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates = 0x5900.'
+    'Set registry: HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates = 0x5944.'
     "Minimum UBR prerequisite not met: $Reason"
     'After OS upgrade/KB compliance, use AvailableUpdates=0x5944 and run \\Microsoft\\Windows\\PI\\Secure-Boot-Update per KB5068202.'
 }
@@ -1328,30 +1328,48 @@ function Update-PK_Cert {
 
 function Update-KEK_Cert {
     # Attempt to load kek_update_map.json from a local repo when provided (offline support)
-    $MapLocalPath = $null
+    $JSON = $null
     $MapFileName = (Split-Path $KEKUpdateMap_URL -Leaf)
-    if ($LocalRepo) { $MapLocalPath = Join-Path $LocalRepo $MapFileName }
-    if (-not $MapLocalPath -and $PSScriptRoot) { $MapLocalPath = Join-Path $PSScriptRoot $MapFileName }
-    if (-not $MapLocalPath -and $UpdatesFolder) { $MapLocalPath = Join-Path $UpdatesFolder $MapFileName }
+    $MapCandidates = @()
 
-    if ($MapLocalPath -and (Test-Path $MapLocalPath)) {
+    if ($LocalRepo) {
+        $MapCandidates += Join-Path $LocalRepo $MapFileName
+        $MapCandidates += Join-Path $LocalRepo ("KEK\\$MapFileName")
+    }
+
+    if ($PSScriptRoot) {
+        $MapCandidates += Join-Path $PSScriptRoot $MapFileName
+        $MapCandidates += Join-Path $PSScriptRoot ("Certs\\$MapFileName")
+        $MapCandidates += Join-Path $PSScriptRoot ("KEK\\$MapFileName")
+        $MapCandidates += Join-Path $PSScriptRoot ("Certs\\KEK\\$MapFileName")
+    }
+
+    if ($UpdatesFolder) {
+        $MapCandidates += Join-Path $UpdatesFolder $MapFileName
+        $MapCandidates += Join-Path $UpdatesFolder ("KEK\\$MapFileName")
+    }
+
+    $MapLocalPath = $MapCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+    if ($MapLocalPath) {
         try {
             $JSON = Get-Content -Raw -Path $MapLocalPath | ConvertFrom-Json
+            'Using local KEK update map "{0}".' -f $MapLocalPath
         }
         catch {
-            "`nERROR: Unable to parse local KEK update map: $MapLocalPath"
-            Write-Host (($_.Exception.Message -split "`n") | select -First 1) -Foreground Red
-            exit 1
+            Write-Warning ("Unable to parse local KEK update map ({0}). Falling back to default local KEK cert workflow. Error: {1}" -f $MapLocalPath, (($_.Exception.Message -split "`n") | Select-Object -First 1))
+            $JSON = $null
         }
     }
-    else {
+
+    if (-not $JSON) {
         try {
             $JSON = (Invoke-WebRequest -UseBasicParsing -Uri $KEKUpdateMap_URL).Content | ConvertFrom-Json
+            'Using online KEK update map from Microsoft.'
         }
         catch {
-            "`nERROR: Unable to parse Microsoft's KEK update map."
-            Write-Host (($_.Exception.Message -split "`n") | select -First 1) -Foreground Red
-            exit 1
+            Write-Warning ("Unable to fetch/parse Microsoft's KEK update map. Falling back to default local KEK cert workflow. Error: {0}" -f (($_.Exception.Message -split "`n") | Select-Object -First 1))
+            $JSON = $null
         }
     }
 
@@ -1519,6 +1537,35 @@ function Print-Header {
     return ("{0}`n{1}" -f $Header, ($Header -replace "`n" -replace '(.)',$Separator))
 }
 
+function Invoke-BCDBootWithFallback {
+    param (
+        [Parameter(Mandatory)]
+        [string]$WindowsPath,
+
+        [Parameter(Mandatory)]
+        [string]$SystemPartition
+    )
+
+    # First try /bootex for CA 2023-aware boot files, then gracefully fallback for older bcdboot builds.
+    $PrimaryArgs = @($WindowsPath, '/s', $SystemPartition, '/f', 'UEFI', '/bootex')
+    $PrimaryOutput = (& bcdboot @PrimaryArgs 2>&1 | Out-String)
+    $PrimaryExitCode = $LASTEXITCODE
+
+    if ($PrimaryExitCode -eq 0 -and $PrimaryOutput -notmatch '(?im)^Bcdboot\s-') {
+        return
+    }
+
+    'BCDBoot /bootex failed or is unsupported on this build. Retrying without /bootex.'
+
+    $FallbackArgs = @($WindowsPath, '/s', $SystemPartition, '/f', 'UEFI')
+    $FallbackOutput = (& bcdboot @FallbackArgs 2>&1 | Out-String)
+    $FallbackExitCode = $LASTEXITCODE
+
+    if ($FallbackExitCode -ne 0 -or $FallbackOutput -match '(?im)^Bcdboot\s-') {
+        throw "BCDBoot failed. ExitCode=$FallbackExitCode`n$FallbackOutput"
+    }
+}
+
 $ScriptBlock = {
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
 
@@ -1541,10 +1588,7 @@ $ScriptBlock = {
     $Result = Confirm-MinimumUBR
 
     if ($Result -ne $true) {
-        Write-Warning 'Minimum Windows UBR check failed. Staging local Secure Boot payloads instead of exiting with a KB-only error.'
-        Invoke-PreReqStaging -Reason $Result
-        Write-Output ''
-        return
+        Write-Warning ('Minimum Windows UBR check failed, but continuing by default: {0}' -f $Result)
     }
 
     $SecureBoot = Confirm-SecureBootUEFI
@@ -1819,7 +1863,7 @@ $ScriptBlock = {
 
                 try {
                     Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
-                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+                    Invoke-BCDBootWithFallback -WindowsPath $env:SystemRoot -SystemPartition $EFI_DriveLetter
                     Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
                 }
                 catch {
@@ -1829,7 +1873,7 @@ $ScriptBlock = {
             }
             else {
                 try {
-                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+                    Invoke-BCDBootWithFallback -WindowsPath $env:SystemRoot -SystemPartition $EFI_DriveLetter
                 }
                 catch {
                     $_.Exception.Message
@@ -1882,7 +1926,7 @@ $ScriptBlock = {
 
                          try {
                              Copy-Item "${DriveLetter}:\EFI\Microsoft\Boot\BCD" $env:TEMP -Force
-                             Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /f UEFI /s $DriveLetter /bootex" -NoNewWindow -Wait
+                             Invoke-BCDBootWithFallback -WindowsPath $env:SystemRoot -SystemPartition $DriveLetter
                              Copy-Item "$env:TEMP\BCD" "${DriveLetter}:\EFI\Microsoft\Boot\BCD" -Force
                              Remove-Item "$env:TEMP\BCD" -Force
                          }

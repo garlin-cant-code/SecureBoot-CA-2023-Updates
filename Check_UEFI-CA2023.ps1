@@ -688,171 +688,15 @@ function Confirm-MinimumUBR {
     return $true
 }
 
-function Invoke-FileStageAsSystem {
-    param (
-        [Parameter(Mandatory)]
-        [string]$SourcePath,
-
-        [Parameter(Mandatory)]
-        [string]$DestinationPath,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$CopyChildren,
-
-        [Parameter(Mandatory=$false)]
-        [int]$TimeoutSeconds = 180
-    )
-
-    if (-not (Test-Path -LiteralPath $SourcePath)) {
-        throw "Source path not found: $SourcePath"
-    }
-
-    $TaskId = [guid]::NewGuid().Guid
-    $TaskName = "SecureBoot-Stage-$TaskId"
-    $ScriptFile = Join-Path $env:TEMP "$TaskName.ps1"
-    $DoneFile = Join-Path $env:TEMP "$TaskName.done"
-    $ErrorFile = Join-Path $env:TEMP "$TaskName.error"
-
-    $EscSource = $SourcePath.Replace("'","''")
-    $EscDestination = $DestinationPath.Replace("'","''")
-    $EscDone = $DoneFile.Replace("'","''")
-    $EscError = $ErrorFile.Replace("'","''")
-
-    if ($CopyChildren) {
-        $CopyCommand = "Copy-Item -Path (Join-Path -Path '$EscSource' -ChildPath '*') -Destination '$EscDestination' -Recurse -Force"
-    }
-    else {
-        $CopyCommand = "Copy-Item -Path '$EscSource' -Destination '$EscDestination' -Recurse -Force"
-    }
-
-    $SystemScript = @"
-`$ErrorActionPreference = 'Stop'
-try {
-    if (-not (Test-Path -LiteralPath '$EscDestination')) {
-        `$null = New-Item -Path '$EscDestination' -ItemType Directory -Force
-    }
-
-    $CopyCommand
-
-    'OK' | Set-Content -LiteralPath '$EscDone' -Encoding Ascii -Force
-}
-catch {
-    (`$_ | Out-String) | Set-Content -LiteralPath '$EscError' -Encoding Ascii -Force
-    exit 1
-}
-"@
-
-    Set-Content -LiteralPath $ScriptFile -Value $SystemScript -Encoding Ascii -Force
-
-    try {
-        $StartTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-        $RunCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$ScriptFile`""
-
-        $null = & schtasks.exe /Create /TN $TaskName /SC ONCE /ST $StartTime /RL HIGHEST /RU SYSTEM /TR $RunCmd /F
-        $null = & schtasks.exe /Run /TN $TaskName
-
-        $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-        while ((Get-Date) -lt $Deadline) {
-            if (Test-Path -LiteralPath $DoneFile) {
-                return $true
-            }
-
-            if (Test-Path -LiteralPath $ErrorFile) {
-                throw (Get-Content -LiteralPath $ErrorFile -Raw)
-            }
-
-            Start-Sleep -Milliseconds 500
-        }
-
-        throw "SYSTEM staging timed out after $TimeoutSeconds seconds."
-    }
-    finally {
-        $null = & schtasks.exe /Delete /TN $TaskName /F 2>$null
-        Remove-Item -LiteralPath $ScriptFile,$DoneFile,$ErrorFile -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Invoke-PreReqStaging {
-    param (
-        [Parameter(Mandatory)]
-        [string]$Reason
-    )
-
-    $CandidateRoots = @()
-
-    if ($PSScriptRoot) {
-        $CandidateRoots += $PSScriptRoot
-        $CandidateRoots += (Join-Path $PSScriptRoot 'Certs')
-    }
-
-    $CurrentPath = (Get-Location).Path
-    if ($CurrentPath) {
-        $CandidateRoots += $CurrentPath
-        $CandidateRoots += (Join-Path $CurrentPath 'Certs')
-    }
-
-    $CandidateRoots = $CandidateRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
-
-    $EFIEX_Source = $null
-    $SecureBootUpdates_Source = $null
-
-    foreach ($Root in $CandidateRoots) {
-        if (-not $EFIEX_Source) {
-            $Path = Join-Path $Root 'EFI_EX'
-            if (Test-Path -LiteralPath $Path) {
-                $EFIEX_Source = $Path
-            }
-        }
-
-        if (-not $SecureBootUpdates_Source) {
-            $Path = Join-Path $Root 'SecureBootUpdates'
-            if (Test-Path -LiteralPath $Path) {
-                $SecureBootUpdates_Source = $Path
-            }
-        }
-    }
-
-    if ($EFIEX_Source) {
-        Invoke-FileStageAsSystem -SourcePath $EFIEX_Source -DestinationPath "$env:SystemRoot\Boot"
-        'Staged EFI_EX into "{0}" from "{1}".' -f "$env:SystemRoot\Boot", $EFIEX_Source
-    }
-    else {
-        Write-Warning 'Unable to find local EFI_EX folder to stage.'
-    }
-
-    $SecureBootUpdates_Dest = "$env:SystemRoot\System32\SecureBootUpdates"
-
-    if (-not (Test-Path -LiteralPath $SecureBootUpdates_Dest)) {
-        $null = New-Item -Path $SecureBootUpdates_Dest -ItemType Directory -Force
-    }
-
-    if ($SecureBootUpdates_Source) {
-        Invoke-FileStageAsSystem -SourcePath $SecureBootUpdates_Source -DestinationPath $SecureBootUpdates_Dest -CopyChildren
-        'Staged SecureBootUpdates into "{0}" from "{1}".' -f $SecureBootUpdates_Dest, $SecureBootUpdates_Source
-    }
-    else {
-        Write-Warning 'Unable to find local SecureBootUpdates folder to stage.'
-    }
-
-    'CHECK MODE: Registry was not modified.'
-    "Minimum UBR prerequisite not met: $Reason"
-}
-
 function Audit-UEFI {
     $CheckList = $null
     $index = 1
     $script:UpdateFlags = $script:RevokeFlags = 0
-    $script:PreReqStagingRequired = $false
 
     $Result = Confirm-MinimumUBR
 
     if ($Result -ne $true) {
-        Write-Warning 'Minimum Windows UBR check failed. Staging local Secure Boot payloads instead of reporting only a KB prerequisite.'
-        Invoke-PreReqStaging -Reason $Result
-        $script:PreReqStagingRequired = $true
-        $CheckList += "{0,-3} Minimum UBR prerequisite not met; staged EFI_EX and SecureBootUpdates (no registry changes were made in check mode).`n" -f ('{0}.' -f $index++)
-        $CheckList += "{0,-3} After OS upgrade/KB compliance, set AvailableUpdates=0x5944 and run \\Microsoft\\Windows\\PI\\Secure-Boot-Update (KB5068202).`n" -f ('{0}.' -f $index++)
-        return $CheckList
+        $CheckList += "{0,-3} {1}`n" -f ('{0}.' -f $index++), $Result
     }
 
     if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
@@ -1372,17 +1216,6 @@ $ScriptBlock = {
         else {
             Write-Output ''
         }
-    }
-
-    if ($PreReqStagingRequired) {
-        Print-Header -Bold "`nREQUIRED ACTION"
-        "OS build/UBR is below the minimum required level for full secure boot servicing."
-        "Payloads were staged to $env:SystemRoot\Boot\EFI_EX and $env:SystemRoot\System32\SecureBootUpdates."
-        "CHECK MODE: Registry values were not modified."
-        "After OS upgrade/KB compliance, run the commands:"
-        '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x5944 /f' -f $Tab4
-        '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
-        return
     }
 
     switch ($UpdateFlags) {
