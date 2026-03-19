@@ -688,6 +688,90 @@ function Confirm-MinimumUBR {
     return $true
 }
 
+function Invoke-FileStageAsSystem {
+    param (
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationPath,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$CopyChildren,
+
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 180
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        throw "Source path not found: $SourcePath"
+    }
+
+    $TaskId = [guid]::NewGuid().Guid
+    $TaskName = "SecureBoot-Stage-$TaskId"
+    $ScriptFile = Join-Path $env:TEMP "$TaskName.ps1"
+    $DoneFile = Join-Path $env:TEMP "$TaskName.done"
+    $ErrorFile = Join-Path $env:TEMP "$TaskName.error"
+
+    $EscSource = $SourcePath.Replace("'","''")
+    $EscDestination = $DestinationPath.Replace("'","''")
+    $EscDone = $DoneFile.Replace("'","''")
+    $EscError = $ErrorFile.Replace("'","''")
+
+    if ($CopyChildren) {
+        $CopyCommand = "Copy-Item -Path (Join-Path -Path '$EscSource' -ChildPath '*') -Destination '$EscDestination' -Recurse -Force"
+    }
+    else {
+        $CopyCommand = "Copy-Item -Path '$EscSource' -Destination '$EscDestination' -Recurse -Force"
+    }
+
+    $SystemScript = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    if (-not (Test-Path -LiteralPath '$EscDestination')) {
+        `$null = New-Item -Path '$EscDestination' -ItemType Directory -Force
+    }
+
+    $CopyCommand
+
+    'OK' | Set-Content -LiteralPath '$EscDone' -Encoding Ascii -Force
+}
+catch {
+    (`$_ | Out-String) | Set-Content -LiteralPath '$EscError' -Encoding Ascii -Force
+    exit 1
+}
+"@
+
+    Set-Content -LiteralPath $ScriptFile -Value $SystemScript -Encoding Ascii -Force
+
+    try {
+        $StartTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
+        $RunCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$ScriptFile`""
+
+        $null = & schtasks.exe /Create /TN $TaskName /SC ONCE /ST $StartTime /RL HIGHEST /RU SYSTEM /TR $RunCmd /F
+        $null = & schtasks.exe /Run /TN $TaskName
+
+        $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $Deadline) {
+            if (Test-Path -LiteralPath $DoneFile) {
+                return $true
+            }
+
+            if (Test-Path -LiteralPath $ErrorFile) {
+                throw (Get-Content -LiteralPath $ErrorFile -Raw)
+            }
+
+            Start-Sleep -Milliseconds 500
+        }
+
+        throw "SYSTEM staging timed out after $TimeoutSeconds seconds."
+    }
+    finally {
+        $null = & schtasks.exe /Delete /TN $TaskName /F 2>$null
+        Remove-Item -LiteralPath $ScriptFile,$DoneFile,$ErrorFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-PreReqStaging {
     param (
         [Parameter(Mandatory)]
@@ -729,7 +813,7 @@ function Invoke-PreReqStaging {
     }
 
     if ($EFIEX_Source) {
-        Copy-Item -Path $EFIEX_Source -Destination "$env:SystemRoot\Boot" -Recurse -Force
+        Invoke-FileStageAsSystem -SourcePath $EFIEX_Source -DestinationPath "$env:SystemRoot\Boot"
         'Staged EFI_EX into "{0}" from "{1}".' -f "$env:SystemRoot\Boot", $EFIEX_Source
     }
     else {
@@ -743,7 +827,7 @@ function Invoke-PreReqStaging {
     }
 
     if ($SecureBootUpdates_Source) {
-        Copy-Item -Path (Join-Path $SecureBootUpdates_Source '*') -Destination $SecureBootUpdates_Dest -Recurse -Force
+        Invoke-FileStageAsSystem -SourcePath $SecureBootUpdates_Source -DestinationPath $SecureBootUpdates_Dest -CopyChildren
         'Staged SecureBootUpdates into "{0}" from "{1}".' -f $SecureBootUpdates_Dest, $SecureBootUpdates_Source
     }
     else {
