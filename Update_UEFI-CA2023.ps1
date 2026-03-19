@@ -137,6 +137,54 @@ $DBXUpdate_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_obj
 $DBXUpdateSVN_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/Optional/DBX/$Arch/DBXUpdateSVN.bin"
 
 $Tab4 = ' ' * 4
+$UpdatedMarkerFile = Join-Path $env:TEMP 'SecureBoot-CA2023-UPDATED.txt'
+$UpdatedMarkerStatePath = 'HKLM:\SOFTWARE\SecureBoot-CA2023-Updates'
+$UpdatedMarkerCountName = 'UpdatedRebootCount'
+$UpdatedMarkerLastBootName = 'UpdatedLastBootId'
+
+function Reset-UpdatedMarkerState {
+    try {
+        if (-not (Test-Path -LiteralPath $UpdatedMarkerStatePath)) {
+            $null = New-Item -Path $UpdatedMarkerStatePath -Force
+        }
+
+        $null = New-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerCountName -PropertyType DWord -Value 0 -Force
+        Remove-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerLastBootName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $UpdatedMarkerFile -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Warning ('Unable to reset completion marker state: {0}' -f $_.Exception.Message)
+    }
+}
+
+function Write-UpdatedMarkerAfterTwoReboots {
+    try {
+        if (-not (Test-Path -LiteralPath $UpdatedMarkerStatePath)) {
+            $null = New-Item -Path $UpdatedMarkerStatePath -Force
+        }
+
+        $CurrentBootId = ([Management.ManagementDateTimeConverter]::ToDateTime((Get-CimInstance Win32_OperatingSystem).LastBootUpTime)).ToString('o')
+        $PreviousBootId = Get-ItemPropertyValue -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerLastBootName -ErrorAction SilentlyContinue
+        $RebootCount = [int](Get-ItemPropertyValue -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerCountName -ErrorAction SilentlyContinue)
+
+        if ($null -eq $PreviousBootId -or $PreviousBootId -ne $CurrentBootId) {
+            $RebootCount++
+            $null = New-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerCountName -PropertyType DWord -Value $RebootCount -Force
+            $null = New-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerLastBootName -PropertyType String -Value $CurrentBootId -Force
+        }
+
+        if ($RebootCount -ge 2) {
+            Set-Content -LiteralPath $UpdatedMarkerFile -Value 'UPDATED:"true"' -Encoding Ascii -Force
+            'Wrote completion marker to "{0}" after {1} reboot(s).' -f $UpdatedMarkerFile, $RebootCount
+        }
+        else {
+            'Completion marker deferred: {0}/2 reboot(s) observed.' -f $RebootCount
+        }
+    }
+    catch {
+        Write-Warning ('Unable to process completion marker state: {0}' -f $_.Exception.Message)
+    }
+}
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
@@ -1853,6 +1901,8 @@ $ScriptBlock = {
     }
 
     if ($UEFI_Updated -or $PK_README -or $KEK_README) {
+        Reset-UpdatedMarkerState
+
         if ($UEFI_Updated -or $Latest) {
             Write-Output ''
         }
@@ -1881,6 +1931,8 @@ $ScriptBlock = {
         if ($Latest) {
             Write-Output ''
         }
+
+        Write-UpdatedMarkerAfterTwoReboots
 
        'SUCCESS: NO UPDATES ARE REQUIRED.'
     }
