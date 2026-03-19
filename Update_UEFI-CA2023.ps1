@@ -917,30 +917,61 @@ function Invoke-FileStageAsSystem {
         [switch]$CopyChildren,
 
         [Parameter(Mandatory=$false)]
-        [int]$TimeoutSeconds = 180
+        [int]$TimeoutSeconds = 300
     )
 
     if (-not (Test-Path -LiteralPath $SourcePath)) {
         throw "Source path not found: $SourcePath"
     }
 
-    $TaskId = [guid]::NewGuid().Guid
-    $TaskName = "SecureBoot-Stage-$TaskId"
-    $ScriptFile = Join-Path $env:TEMP "$TaskName.ps1"
-    $DoneFile = Join-Path $env:TEMP "$TaskName.done"
-    $ErrorFile = Join-Path $env:TEMP "$TaskName.error"
+    $TaskId = [guid]::NewGuid().Guid.Substring(0,8)
+    $TaskName = "SBStage-$TaskId"
+
+    $StageWorkRoot = Join-Path $env:ProgramData 'SBStage'
+    if (-not (Test-Path -LiteralPath $StageWorkRoot)) {
+        $null = New-Item -Path $StageWorkRoot -ItemType Directory -Force
+    }
+
+    $ScriptFile = Join-Path $StageWorkRoot "$TaskName.ps1"
+    $DoneFile = Join-Path $StageWorkRoot "$TaskName.done"
+    $ErrorFile = Join-Path $StageWorkRoot "$TaskName.error"
+    $StageSourceRoot = Join-Path $StageWorkRoot "$TaskName-src"
+    $StageSourcePath = Join-Path $StageSourceRoot (Split-Path -Path $SourcePath -Leaf)
+    $EscScriptFile = $ScriptFile.Replace("'","''")
 
     $EscSource = $SourcePath.Replace("'","''")
+    $EscStageSource = $StageSourcePath.Replace("'","''")
     $EscDestination = $DestinationPath.Replace("'","''")
     $EscDone = $DoneFile.Replace("'","''")
     $EscError = $ErrorFile.Replace("'","''")
 
     if ($CopyChildren) {
-        $CopyCommand = "Copy-Item -Path (Join-Path -Path '$EscSource' -ChildPath '*') -Destination '$EscDestination' -Recurse -Force"
+        $RobocopyDestination = $DestinationPath
     }
     else {
-        $CopyCommand = "Copy-Item -Path '$EscSource' -Destination '$EscDestination' -Recurse -Force"
+        $RobocopyDestination = Join-Path $DestinationPath (Split-Path -Path $SourcePath -Leaf)
     }
+
+    $EscRoboDest = $RobocopyDestination.Replace("'","''")
+
+    if (Test-Path -LiteralPath $StageSourceRoot) {
+        Remove-Item -LiteralPath $StageSourceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $null = New-Item -Path $StageSourceRoot -ItemType Directory -Force
+    Copy-Item -Path $SourcePath -Destination $StageSourceRoot -Recurse -Force
+
+    $CopyCommand = @"
+if (-not (Test-Path -LiteralPath '$EscRoboDest')) {
+    `$null = New-Item -Path '$EscRoboDest' -ItemType Directory -Force -ErrorAction SilentlyContinue
+}
+
+`$null = & robocopy '$EscStageSource' '$EscRoboDest' * /E /B /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+`$rc = `$LASTEXITCODE
+if (`$rc -ge 8) {
+    throw "Robocopy failed with exit code `$rc (source '$EscStageSource' -> destination '$EscRoboDest')."
+}
+"@
 
     $SystemScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -961,14 +992,40 @@ catch {
 
     Set-Content -LiteralPath $ScriptFile -Value $SystemScript -Encoding Ascii -Force
 
+    "[SYSTEM-STAGE] Source: $SourcePath"
+    "[SYSTEM-STAGE] StagedSource: $StageSourcePath"
+    "[SYSTEM-STAGE] Destination: $DestinationPath"
+    "[SYSTEM-STAGE] RobocopyDestination: $RobocopyDestination"
+    "[SYSTEM-STAGE] Script: $ScriptFile"
+    "[SYSTEM-STAGE] Markers: $DoneFile ; $ErrorFile"
+
     try {
-        $StartTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-        $RunCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$ScriptFile`""
+        $ScheduleSvc = Get-Service -Name Schedule -ErrorAction SilentlyContinue
+        if ($null -eq $ScheduleSvc) {
+            throw 'Task Scheduler service (Schedule) was not found.'
+        }
+
+        if ($ScheduleSvc.Status -ne 'Running') {
+            Start-Service -Name Schedule -ErrorAction Stop
+        }
+
+        $StartTime = (Get-Date).AddMinutes(5).ToString('HH:mm')
+        $RunCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ScriptFile"
 
         $null = & schtasks.exe /Create /TN $TaskName /SC ONCE /ST $StartTime /RL HIGHEST /RU SYSTEM /TR $RunCmd /F
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create SYSTEM staging task '$TaskName' (exit code $LASTEXITCODE)."
+        }
+
         $null = & schtasks.exe /Run /TN $TaskName
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to run SYSTEM staging task '$TaskName' (exit code $LASTEXITCODE)."
+        }
 
         $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        $NextWaitPrint = (Get-Date).AddSeconds(15)
+        $NoMarkerDeadline = (Get-Date).AddSeconds([Math]::Min(120, [Math]::Max(45, [int]($TimeoutSeconds / 2))))
+
         while ((Get-Date) -lt $Deadline) {
             if (Test-Path -LiteralPath $DoneFile) {
                 return $true
@@ -978,14 +1035,30 @@ catch {
                 throw (Get-Content -LiteralPath $ErrorFile -Raw)
             }
 
+            if ((Get-Date) -ge $NextWaitPrint) {
+                "[SYSTEM-STAGE] Waiting for completion markers..."
+                $NextWaitPrint = (Get-Date).AddSeconds(15)
+            }
+
+            if ((Get-Date) -ge $NoMarkerDeadline) {
+                $TaskQuery = (& schtasks.exe /Query /TN $TaskName /V /FO LIST 2>$null) -join "`n"
+                throw "SYSTEM staging produced no completion markers after extended wait. Task may be blocked from launching PowerShell payload.`n$TaskQuery"
+            }
+
             Start-Sleep -Milliseconds 500
         }
 
-        throw "SYSTEM staging timed out after $TimeoutSeconds seconds."
+        $TaskQuery = (& schtasks.exe /Query /TN $TaskName /V /FO LIST) -join "`n"
+        if (Test-Path -LiteralPath $ErrorFile) {
+            throw (Get-Content -LiteralPath $ErrorFile -Raw)
+        }
+
+        throw "SYSTEM staging timed out after $TimeoutSeconds seconds.`n$TaskQuery"
     }
     finally {
         $null = & schtasks.exe /Delete /TN $TaskName /F 2>$null
         Remove-Item -LiteralPath $ScriptFile,$DoneFile,$ErrorFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $StageSourceRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -995,42 +1068,60 @@ function Invoke-PreReqStaging {
         [string]$Reason
     )
 
-    $CandidateRoots = @()
-
-    if ($LocalRepo) {
-        $CandidateRoots += $LocalRepo
-        $CandidateRoots += (Join-Path $LocalRepo 'Certs')
+    $LocalRepoPath = $LocalRepo
+    if (-not $LocalRepoPath -and $PSScriptRoot) {
+        $LocalRepoPath = Join-Path $PSScriptRoot 'Certs'
     }
 
+    $SourceRoots = @()
     if ($PSScriptRoot) {
-        $CandidateRoots += $PSScriptRoot
-        $CandidateRoots += (Join-Path $PSScriptRoot 'Certs')
+        $SourceRoots += (Join-Path $PSScriptRoot 'Certs')
+        $SourceRoots += $PSScriptRoot
     }
-
+    if ($LocalRepoPath) {
+        $SourceRoots += $LocalRepoPath
+    }
     if ($UpdatesFolder) {
-        $CandidateRoots += $UpdatesFolder
+        $SourceRoots += $UpdatesFolder
     }
 
-    $CandidateRoots = $CandidateRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+    $SourceRoots = $SourceRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
 
-    $EFIEX_Source = $null
-    $SecureBootUpdates_Source = $null
+    '[SYSTEM-STAGE] Candidate source roots:'
+    $SourceRoots | ForEach-Object { "[SYSTEM-STAGE] - $_" }
 
-    foreach ($Root in $CandidateRoots) {
-        if (-not $EFIEX_Source) {
-            $Path = Join-Path $Root 'EFI_EX'
-            if (Test-Path -LiteralPath $Path) {
-                $EFIEX_Source = $Path
-            }
-        }
+    $EFIEX_SourceCandidates = @()
+    $SecureBootUpdates_SourceCandidates = @()
 
-        if (-not $SecureBootUpdates_Source) {
-            $Path = Join-Path $Root 'SecureBootUpdates'
-            if (Test-Path -LiteralPath $Path) {
-                $SecureBootUpdates_Source = $Path
-            }
-        }
+    foreach ($Root in $SourceRoots) {
+        $EFIEX_SourceCandidates += (Join-Path $Root 'EFI_EX')
+        $EFIEX_SourceCandidates += (Join-Path $Root 'Certs\EFI_EX')
+
+        $SecureBootUpdates_SourceCandidates += (Join-Path $Root 'SecureBootUpdates')
+        $SecureBootUpdates_SourceCandidates += (Join-Path $Root 'Certs\SecureBootUpdates')
     }
+
+    $EFIEX_Source = $EFIEX_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $SecureBootUpdates_Source = $SecureBootUpdates_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+    if (-not $EFIEX_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path (Join-Path $PSScriptRoot 'Certs') -Directory -Filter 'EFI_EX' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $EFIEX_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
+    if (-not $SecureBootUpdates_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path (Join-Path $PSScriptRoot 'Certs') -Directory -Filter 'SecureBootUpdates' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $SecureBootUpdates_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
+    "[SYSTEM-STAGE] Resolved EFI_EX source: $EFIEX_Source"
+    "[SYSTEM-STAGE] Resolved SecureBootUpdates source: $SecureBootUpdates_Source"
 
     if ($EFIEX_Source) {
         Invoke-FileStageAsSystem -SourcePath $EFIEX_Source -DestinationPath "$env:SystemRoot\Boot"
