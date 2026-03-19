@@ -688,16 +688,87 @@ function Confirm-MinimumUBR {
     return $true
 }
 
+function Invoke-PreReqStaging {
+    param (
+        [Parameter(Mandatory)]
+        [string]$Reason
+    )
+
+    $CandidateRoots = @()
+
+    if ($PSScriptRoot) {
+        $CandidateRoots += $PSScriptRoot
+        $CandidateRoots += (Join-Path $PSScriptRoot 'Certs')
+    }
+
+    $CurrentPath = (Get-Location).Path
+    if ($CurrentPath) {
+        $CandidateRoots += $CurrentPath
+        $CandidateRoots += (Join-Path $CurrentPath 'Certs')
+    }
+
+    $CandidateRoots = $CandidateRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+
+    $EFIEX_Source = $null
+    $SecureBootUpdates_Source = $null
+
+    foreach ($Root in $CandidateRoots) {
+        if (-not $EFIEX_Source) {
+            $Path = Join-Path $Root 'EFI_EX'
+            if (Test-Path -LiteralPath $Path) {
+                $EFIEX_Source = $Path
+            }
+        }
+
+        if (-not $SecureBootUpdates_Source) {
+            $Path = Join-Path $Root 'SecureBootUpdates'
+            if (Test-Path -LiteralPath $Path) {
+                $SecureBootUpdates_Source = $Path
+            }
+        }
+    }
+
+    if ($EFIEX_Source) {
+        Copy-Item -Path $EFIEX_Source -Destination "$env:SystemRoot\Boot" -Recurse -Force
+        'Staged EFI_EX into "{0}" from "{1}".' -f "$env:SystemRoot\Boot", $EFIEX_Source
+    }
+    else {
+        Write-Warning 'Unable to find local EFI_EX folder to stage.'
+    }
+
+    $SecureBootUpdates_Dest = "$env:SystemRoot\System32\SecureBootUpdates"
+
+    if (-not (Test-Path -LiteralPath $SecureBootUpdates_Dest)) {
+        $null = New-Item -Path $SecureBootUpdates_Dest -ItemType Directory -Force
+    }
+
+    if ($SecureBootUpdates_Source) {
+        Copy-Item -Path (Join-Path $SecureBootUpdates_Source '*') -Destination $SecureBootUpdates_Dest -Recurse -Force
+        'Staged SecureBootUpdates into "{0}" from "{1}".' -f $SecureBootUpdates_Dest, $SecureBootUpdates_Source
+    }
+    else {
+        Write-Warning 'Unable to find local SecureBootUpdates folder to stage.'
+    }
+
+    'CHECK MODE: Registry was not modified.'
+    "Minimum UBR prerequisite not met: $Reason"
+}
+
 function Audit-UEFI {
     $CheckList = $null
     $index = 1
     $script:UpdateFlags = $script:RevokeFlags = 0
+    $script:PreReqStagingRequired = $false
 
     $Result = Confirm-MinimumUBR
 
     if ($Result -ne $true) {
-        $CheckList += "{0,-3} {1}`n" -f ('{0}.' -f $index++), $Result
-        $NotMinimumUBR = $true
+        Write-Warning 'Minimum Windows UBR check failed. Staging local Secure Boot payloads instead of reporting only a KB prerequisite.'
+        Invoke-PreReqStaging -Reason $Result
+        $script:PreReqStagingRequired = $true
+        $CheckList += "{0,-3} Minimum UBR prerequisite not met; staged EFI_EX and SecureBootUpdates (no registry changes were made in check mode).`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} After OS upgrade/KB compliance, set AvailableUpdates=0x5944 and run \\Microsoft\\Windows\\PI\\Secure-Boot-Update (KB5068202).`n" -f ('{0}.' -f $index++)
+        return $CheckList
     }
 
     if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
@@ -1217,6 +1288,17 @@ $ScriptBlock = {
         else {
             Write-Output ''
         }
+    }
+
+    if ($PreReqStagingRequired) {
+        Print-Header -Bold "`nREQUIRED ACTION"
+        "OS build/UBR is below the minimum required level for full secure boot servicing."
+        "Payloads were staged to $env:SystemRoot\Boot\EFI_EX and $env:SystemRoot\System32\SecureBootUpdates."
+        "CHECK MODE: Registry values were not modified."
+        "After OS upgrade/KB compliance, run the commands:"
+        '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x5944 /f' -f $Tab4
+        '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
+        return
     }
 
     switch ($UpdateFlags) {
