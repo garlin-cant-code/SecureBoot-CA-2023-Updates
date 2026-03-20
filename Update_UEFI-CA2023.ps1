@@ -655,68 +655,98 @@ function Download-EDK2bin {
 }
 
 function Suspend-SystemBitLocker {
-    $ProtectionStatus = $null
-    $BitLockerVolumeCmd = Get-Command -Name 'Get-BitLockerVolume' -ErrorAction SilentlyContinue
+    # Use persistent suspension so protectors stay disabled across reboots until explicitly resumed.
+    $PersistentRebootCount = 0
 
-    if ($BitLockerVolumeCmd) {
+    $BitLockerVolumeCmd = Get-Command -Name 'Get-BitLockerVolume' -ErrorAction SilentlyContinue
+    $SuspendCmd = Get-Command -Name 'Suspend-BitLocker' -ErrorAction SilentlyContinue
+    $ManageBdeCmd = Get-Command -Name 'manage-bde.exe' -ErrorAction SilentlyContinue
+
+    $GetProtectionStatus = {
+        if (-not $BitLockerVolumeCmd) {
+            return $null
+        }
+
         try {
-            $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop).ProtectionStatus
+            return (Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop).ProtectionStatus
         }
         catch {
-            Write-Warning ('Unable to query BitLocker status on {0} via Get-BitLockerVolume. Will try manage-bde fallback. Error: {1}' -f $SystemDrive, $_.Exception.Message)
+            Write-Warning ('Unable to query BitLocker status on {0}: {1}' -f $SystemDrive, $_.Exception.Message)
+            return $null
         }
     }
-    else {
-        Write-Warning 'Get-BitLockerVolume is not available. Will try manage-bde fallback.'
+
+    $ProtectionStatus = & $GetProtectionStatus
+
+    if ($ProtectionStatus -eq 'On') {
+        'Disabling BitLocker protectors and blocking auto-reactivation across reboots.'
     }
-
-    if ($ProtectionStatus -and $ProtectionStatus -ne 'On') {
-        'BitLocker is not enabled on system drive. Continuing.'
-        return
-    }
-
-    $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
-
-    if ($DeviceGuard_Running -eq 1) {
-        'Suspending BitLocker for two reboots (Device Guard).'
-        $RebootCount = 3
+    elseif ($ProtectionStatus -eq 'Off') {
+        'BitLocker is already OFF. Enforcing persistent OFF state across reboots.'
     }
     else {
-        'Suspending BitLocker for one reboot.'
-        $RebootCount = 1
+        'BitLocker status could not be determined. Applying persistent disable safeguards.'
     }
 
-    $SuspendCmd = Get-Command -Name 'Suspend-BitLocker' -ErrorAction SilentlyContinue
+    $DisableApplied = $false
+
     if ($SuspendCmd) {
         try {
-            $null = Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $RebootCount -ErrorAction Stop
-            return
+            $null = Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $PersistentRebootCount -ErrorAction Stop
+            $DisableApplied = $true
         }
         catch {
             Write-Warning ('Suspend-BitLocker failed, trying manage-bde fallback. Error: {0}' -f $_.Exception.Message)
         }
     }
-    else {
-        Write-Warning 'Suspend-BitLocker is not available. Trying manage-bde fallback.'
-    }
 
-    if (-not (Get-Command -Name 'manage-bde.exe' -ErrorAction SilentlyContinue)) {
-        Write-Host 'ERROR: Unable to suspend BitLocker. Neither Suspend-BitLocker nor manage-bde.exe is available.' -ForegroundColor Red
-        exit 1
-    }
+    if (-not $DisableApplied -and $ManageBdeCmd) {
+        $ManageBdeOutput = (& manage-bde.exe -protectors -disable $SystemDrive -RebootCount $PersistentRebootCount 2>&1 | Out-String)
+        $ManageBdeExitCode = $LASTEXITCODE
 
-    $ManageBdeOutput = (& manage-bde.exe -protectors -disable $SystemDrive -RebootCount $RebootCount 2>&1 | Out-String)
-    $ManageBdeExitCode = $LASTEXITCODE
-
-    if ($ManageBdeExitCode -ne 0) {
-        Write-Host ('ERROR: manage-bde fallback failed (exit code {0}).' -f $ManageBdeExitCode) -ForegroundColor Red
-        if ($ManageBdeOutput) {
-            Write-Host $ManageBdeOutput -ForegroundColor Red
+        if ($ManageBdeExitCode -ne 0) {
+            Write-Host ('ERROR: manage-bde fallback failed (exit code {0}).' -f $ManageBdeExitCode) -ForegroundColor Red
+            if ($ManageBdeOutput) {
+                Write-Host $ManageBdeOutput -ForegroundColor Red
+            }
+            exit 1
         }
+
+        $DisableApplied = $true
+        'BitLocker protectors disabled via manage-bde fallback (persistent mode).'
+    }
+
+    if (-not $DisableApplied) {
+        Write-Host 'ERROR: Unable to disable BitLocker protectors. Neither Suspend-BitLocker nor manage-bde.exe succeeded.' -ForegroundColor Red
         exit 1
     }
 
-    'BitLocker suspended via manage-bde fallback.'
+    $VerificationStatus = & $GetProtectionStatus
+    if ($VerificationStatus -eq 'On') {
+        if (-not $ManageBdeCmd) {
+            Write-Host 'ERROR: BitLocker remains ON and manage-bde.exe is unavailable for enforcement.' -ForegroundColor Red
+            exit 1
+        }
+
+        $ManageBdeOutput = (& manage-bde.exe -protectors -disable $SystemDrive -RebootCount $PersistentRebootCount 2>&1 | Out-String)
+        $ManageBdeExitCode = $LASTEXITCODE
+        if ($ManageBdeExitCode -ne 0) {
+            Write-Host ('ERROR: BitLocker remains ON and manage-bde enforcement failed (exit code {0}).' -f $ManageBdeExitCode) -ForegroundColor Red
+            if ($ManageBdeOutput) {
+                Write-Host $ManageBdeOutput -ForegroundColor Red
+            }
+            exit 1
+        }
+
+        Start-Sleep -Seconds 2
+        $VerificationStatus = & $GetProtectionStatus
+        if ($VerificationStatus -eq 'On') {
+            Write-Host 'ERROR: BitLocker protection is still ON after persistent disable attempts. Aborting update for safety.' -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    'BitLocker protectors are disabled with persistent mode (RebootCount=0).'
 }
 
 function Set-SecureBootSignedFile {
