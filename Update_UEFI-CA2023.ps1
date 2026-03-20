@@ -655,28 +655,68 @@ function Download-EDK2bin {
 }
 
 function Suspend-SystemBitLocker {
-    $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
+    $ProtectionStatus = $null
+    $BitLockerVolumeCmd = Get-Command -Name 'Get-BitLockerVolume' -ErrorAction SilentlyContinue
 
-    if ($ProtectionStatus -eq 'On') {
-        $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
-
-        if ($DeviceGuard_Running -eq 1) {
-            'Suspending BitLocker for two reboots (Device Guard).'
-            $RebootCount = 3
-        }
-        else {
-            'Suspending BitLocker for one reboot.'
-            $RebootCount = 1
-        }
-
+    if ($BitLockerVolumeCmd) {
         try {
-            $null = Microsoft.BitLocker.Management\Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $RebootCount
+            $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop).ProtectionStatus
         }
         catch {
-            $_.Exception.Message
-            exit 1
+            Write-Warning ('Unable to query BitLocker status on {0} via Get-BitLockerVolume. Will try manage-bde fallback. Error: {1}' -f $SystemDrive, $_.Exception.Message)
         }
     }
+    else {
+        Write-Warning 'Get-BitLockerVolume is not available. Will try manage-bde fallback.'
+    }
+
+    if ($ProtectionStatus -and $ProtectionStatus -ne 'On') {
+        'BitLocker is not enabled on system drive. Continuing.'
+        return
+    }
+
+    $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
+
+    if ($DeviceGuard_Running -eq 1) {
+        'Suspending BitLocker for two reboots (Device Guard).'
+        $RebootCount = 3
+    }
+    else {
+        'Suspending BitLocker for one reboot.'
+        $RebootCount = 1
+    }
+
+    $SuspendCmd = Get-Command -Name 'Suspend-BitLocker' -ErrorAction SilentlyContinue
+    if ($SuspendCmd) {
+        try {
+            $null = Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $RebootCount -ErrorAction Stop
+            return
+        }
+        catch {
+            Write-Warning ('Suspend-BitLocker failed, trying manage-bde fallback. Error: {0}' -f $_.Exception.Message)
+        }
+    }
+    else {
+        Write-Warning 'Suspend-BitLocker is not available. Trying manage-bde fallback.'
+    }
+
+    if (-not (Get-Command -Name 'manage-bde.exe' -ErrorAction SilentlyContinue)) {
+        Write-Host 'ERROR: Unable to suspend BitLocker. Neither Suspend-BitLocker nor manage-bde.exe is available.' -ForegroundColor Red
+        exit 1
+    }
+
+    $ManageBdeOutput = (& manage-bde.exe -protectors -disable $SystemDrive -RebootCount $RebootCount 2>&1 | Out-String)
+    $ManageBdeExitCode = $LASTEXITCODE
+
+    if ($ManageBdeExitCode -ne 0) {
+        Write-Host ('ERROR: manage-bde fallback failed (exit code {0}).' -f $ManageBdeExitCode) -ForegroundColor Red
+        if ($ManageBdeOutput) {
+            Write-Host $ManageBdeOutput -ForegroundColor Red
+        }
+        exit 1
+    }
+
+    'BitLocker suspended via manage-bde fallback.'
 }
 
 function Set-SecureBootSignedFile {
@@ -972,6 +1012,13 @@ function Invoke-FileStageAsSystem {
         throw "Source path not found: $SourcePath"
     }
 
+    $SourceItem = Get-Item -LiteralPath $SourcePath -ErrorAction Stop
+    $IsDirectory = $SourceItem.PSIsContainer
+
+    if ($CopyChildren -and -not $IsDirectory) {
+        throw "CopyChildren is only supported when SourcePath is a directory: $SourcePath"
+    }
+
     $TaskId = [guid]::NewGuid().Guid.Substring(0,8)
     $TaskName = "SBStage-$TaskId"
 
@@ -987,29 +1034,40 @@ function Invoke-FileStageAsSystem {
     $StageSourcePath = Join-Path $StageSourceRoot (Split-Path -Path $SourcePath -Leaf)
     $EscScriptFile = $ScriptFile.Replace("'","''")
 
-    $EscSource = $SourcePath.Replace("'","''")
     $EscStageSource = $StageSourcePath.Replace("'","''")
     $EscDestination = $DestinationPath.Replace("'","''")
     $EscDone = $DoneFile.Replace("'","''")
     $EscError = $ErrorFile.Replace("'","''")
 
-    if ($CopyChildren) {
-        $RobocopyDestination = $DestinationPath
+    $RobocopyDestination = $null
+    $EscRoboDest = $null
+    $EscSourceLeaf = $null
+
+    if ($IsDirectory) {
+        if ($CopyChildren) {
+            $RobocopyDestination = $DestinationPath
+        }
+        else {
+            $RobocopyDestination = Join-Path $DestinationPath (Split-Path -Path $SourcePath -Leaf)
+        }
+
+        $EscRoboDest = $RobocopyDestination.Replace("'","''")
     }
     else {
-        $RobocopyDestination = Join-Path $DestinationPath (Split-Path -Path $SourcePath -Leaf)
+        $EscRoboDest = $EscDestination
+        $EscSourceLeaf = (Split-Path -Path $SourcePath -Leaf).Replace("'","''")
     }
-
-    $EscRoboDest = $RobocopyDestination.Replace("'","''")
 
     if (Test-Path -LiteralPath $StageSourceRoot) {
         Remove-Item -LiteralPath $StageSourceRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     $null = New-Item -Path $StageSourceRoot -ItemType Directory -Force
-    Copy-Item -Path $SourcePath -Destination $StageSourceRoot -Recurse -Force
 
-    $CopyCommand = @"
+    if ($IsDirectory) {
+        Copy-Item -Path $SourcePath -Destination $StageSourceRoot -Recurse -Force
+
+        $CopyCommand = @"
 if (-not (Test-Path -LiteralPath '$EscRoboDest')) {
     `$null = New-Item -Path '$EscRoboDest' -ItemType Directory -Force -ErrorAction SilentlyContinue
 }
@@ -1020,6 +1078,18 @@ if (`$rc -ge 8) {
     throw "Robocopy failed with exit code `$rc (source '$EscStageSource' -> destination '$EscRoboDest')."
 }
 "@
+    }
+    else {
+        Copy-Item -LiteralPath $SourcePath -Destination $StageSourcePath -Force
+
+        $CopyCommand = @"
+`$null = & robocopy '$StageSourceRoot' '$EscRoboDest' '$EscSourceLeaf' /B /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+`$rc = `$LASTEXITCODE
+if (`$rc -ge 8) {
+    throw "Robocopy failed with exit code `$rc (source '$StageSourceRoot\\$EscSourceLeaf' -> destination '$EscRoboDest\\$EscSourceLeaf')."
+}
+"@
+    }
 
     $SystemScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -1043,7 +1113,13 @@ catch {
     "[SYSTEM-STAGE] Source: $SourcePath"
     "[SYSTEM-STAGE] StagedSource: $StageSourcePath"
     "[SYSTEM-STAGE] Destination: $DestinationPath"
-    "[SYSTEM-STAGE] RobocopyDestination: $RobocopyDestination"
+    if ($IsDirectory) {
+        "[SYSTEM-STAGE] Mode: Directory"
+        "[SYSTEM-STAGE] RobocopyDestination: $RobocopyDestination"
+    }
+    else {
+        "[SYSTEM-STAGE] Mode: File"
+    }
     "[SYSTEM-STAGE] Script: $ScriptFile"
     "[SYSTEM-STAGE] Markers: $DoneFile ; $ErrorFile"
 
@@ -1140,6 +1216,8 @@ function Invoke-PreReqStaging {
 
     $EFIEX_SourceCandidates = @()
     $SecureBootUpdates_SourceCandidates = @()
+    $BCDBoot_SourceCandidates = @()
+    $BCDBootMui_SourceCandidates = @()
 
     foreach ($Root in $SourceRoots) {
         $EFIEX_SourceCandidates += (Join-Path $Root 'EFI_EX')
@@ -1147,10 +1225,20 @@ function Invoke-PreReqStaging {
 
         $SecureBootUpdates_SourceCandidates += (Join-Path $Root 'SecureBootUpdates')
         $SecureBootUpdates_SourceCandidates += (Join-Path $Root 'Certs\SecureBootUpdates')
+
+        $BCDBoot_SourceCandidates += (Join-Path $Root 'bcdboot.exe')
+        $BCDBoot_SourceCandidates += (Join-Path $Root 'Certs\bcdboot.exe')
+
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'bcdboot.exe.mui')
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'fr-FR\bcdboot.exe.mui')
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'Certs\bcdboot.exe.mui')
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'Certs\fr-FR\bcdboot.exe.mui')
     }
 
     $EFIEX_Source = $EFIEX_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     $SecureBootUpdates_Source = $SecureBootUpdates_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $BCDBoot_Source = $BCDBoot_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $BCDBootMui_Source = $BCDBootMui_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
     if (-not $EFIEX_Source -and $PSScriptRoot) {
         try {
@@ -1168,8 +1256,26 @@ function Invoke-PreReqStaging {
         catch {}
     }
 
+    if (-not $BCDBoot_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path $PSScriptRoot -File -Filter 'bcdboot.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $BCDBoot_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
+    if (-not $BCDBootMui_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path $PSScriptRoot -File -Filter 'bcdboot.exe.mui' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $BCDBootMui_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
     "[SYSTEM-STAGE] Resolved EFI_EX source: $EFIEX_Source"
     "[SYSTEM-STAGE] Resolved SecureBootUpdates source: $SecureBootUpdates_Source"
+    "[SYSTEM-STAGE] Resolved bcdboot.exe source: $BCDBoot_Source"
+    "[SYSTEM-STAGE] Resolved bcdboot.exe.mui source: $BCDBootMui_Source"
 
     if ($EFIEX_Source) {
         Invoke-FileStageAsSystem -SourcePath $EFIEX_Source -DestinationPath "$env:SystemRoot\Boot"
@@ -1191,6 +1297,22 @@ function Invoke-PreReqStaging {
     }
     else {
         Write-Warning 'Unable to find local SecureBootUpdates folder to stage.'
+    }
+
+    if ($BCDBoot_Source) {
+        Invoke-FileStageAsSystem -SourcePath $BCDBoot_Source -DestinationPath "$env:SystemRoot\System32"
+        'Staged bcdboot.exe into "{0}" from "{1}".' -f "$env:SystemRoot\System32", $BCDBoot_Source
+    }
+    else {
+        Write-Warning 'Unable to find local bcdboot.exe to stage.'
+    }
+
+    if ($BCDBootMui_Source) {
+        Invoke-FileStageAsSystem -SourcePath $BCDBootMui_Source -DestinationPath "$env:SystemRoot\System32\fr-FR"
+        'Staged bcdboot.exe.mui into "{0}" from "{1}".' -f "$env:SystemRoot\System32\fr-FR", $BCDBootMui_Source
+    }
+    else {
+        Write-Warning 'Unable to find local bcdboot.exe.mui to stage.'
     }
 
     $SecureBootReg = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot'
@@ -1589,6 +1711,13 @@ $ScriptBlock = {
 
     if ($Result -ne $true) {
         Write-Warning ('Minimum Windows UBR check failed, but continuing by default: {0}' -f $Result)
+
+        try {
+            Invoke-PreReqStaging -Reason $Result
+        }
+        catch {
+            Write-Warning ('Pre-requisite staging failed after minimum UBR check failure: {0}' -f $_.Exception.Message)
+        }
     }
 
     $SecureBoot = Confirm-SecureBootUEFI
