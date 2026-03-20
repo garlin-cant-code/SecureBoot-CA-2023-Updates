@@ -1960,7 +1960,7 @@ $ScriptBlock = {
         }
     }
 
-    if (($Revoke -and $VBS_Enabled) -or $SkuSiPolicy) {
+    if ($VBS_Enabled -or $SkuSiPolicy) {
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
             $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
             $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
