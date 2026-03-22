@@ -4,7 +4,7 @@
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
-.AUTHOR garlin
+.AUTHOR garlin, ungentilgarcon (@garlin-cant-code) (@ungentilgarcon)
 
 .COPYRIGHT
 
@@ -94,6 +94,15 @@ param (
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Log,
 
+    [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [string]$LocalRepo = "${PSScriptRoot}\Certs",
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [switch]$Offline,
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [switch]$DownloadContent,
+
     [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
     [string[]]$ignored
 )
@@ -128,6 +137,54 @@ $DBXUpdate_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_obj
 $DBXUpdateSVN_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/Optional/DBX/$Arch/DBXUpdateSVN.bin"
 
 $Tab4 = ' ' * 4
+$UpdatedMarkerFile = Join-Path $env:TEMP 'SecureBoot-CA2023-UPDATED.txt'
+$UpdatedMarkerStatePath = 'HKLM:\SOFTWARE\SecureBoot-CA2023-Updates'
+$UpdatedMarkerCountName = 'UpdatedRebootCount'
+$UpdatedMarkerLastBootName = 'UpdatedLastBootId'
+
+function Reset-UpdatedMarkerState {
+    try {
+        if (-not (Test-Path -LiteralPath $UpdatedMarkerStatePath)) {
+            $null = New-Item -Path $UpdatedMarkerStatePath -Force
+        }
+
+        $null = New-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerCountName -PropertyType DWord -Value 0 -Force
+        Remove-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerLastBootName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $UpdatedMarkerFile -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Warning ('Unable to reset completion marker state: {0}' -f $_.Exception.Message)
+    }
+}
+
+function Write-UpdatedMarkerAfterTwoReboots {
+    try {
+        if (-not (Test-Path -LiteralPath $UpdatedMarkerStatePath)) {
+            $null = New-Item -Path $UpdatedMarkerStatePath -Force
+        }
+
+        $CurrentBootId = ([Management.ManagementDateTimeConverter]::ToDateTime((Get-CimInstance Win32_OperatingSystem).LastBootUpTime)).ToString('o')
+        $PreviousBootId = Get-ItemPropertyValue -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerLastBootName -ErrorAction SilentlyContinue
+        $RebootCount = [int](Get-ItemPropertyValue -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerCountName -ErrorAction SilentlyContinue)
+
+        if ($null -eq $PreviousBootId -or $PreviousBootId -ne $CurrentBootId) {
+            $RebootCount++
+            $null = New-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerCountName -PropertyType DWord -Value $RebootCount -Force
+            $null = New-ItemProperty -Path $UpdatedMarkerStatePath -Name $UpdatedMarkerLastBootName -PropertyType String -Value $CurrentBootId -Force
+        }
+
+        if ($RebootCount -ge 2) {
+            Set-Content -LiteralPath $UpdatedMarkerFile -Value 'UPDATED:"true"' -Encoding Ascii -Force
+            'Wrote completion marker to "{0}" after {1} reboot(s).' -f $UpdatedMarkerFile, $RebootCount
+        }
+        else {
+            'Completion marker deferred: {0}/2 reboot(s) observed.' -f $RebootCount
+        }
+    }
+    catch {
+        Write-Warning ('Unable to process completion marker state: {0}' -f $_.Exception.Message)
+    }
+}
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
@@ -566,13 +623,25 @@ function Download-EDK2bin {
         $null = New-Item -Path $EDK2_Folder -Type Directory -Force
     }
 
-    try {
-        'Downloading "{0}" from GitHub.' -f ($EDK2bin_URL -split '/')[-1]
-        Invoke-WebRequest -UseBasicParsing -Uri $EDK2bin_URL -OutFile $ZIP_File
+    # Prefer a local copy of the edk2 zip when available (offline support)
+    $LocalEDK2Zip = $null
+    $EDK2ZipName = ($EDK2bin_URL -split '/')[-1]
+    if ($LocalRepo) { $LocalEDK2Zip = Join-Path $LocalRepo $EDK2ZipName }
+    if (-not $LocalEDK2Zip -and $PSScriptRoot) { $LocalEDK2Zip = Join-Path $PSScriptRoot $EDK2ZipName }
+
+    if ($LocalEDK2Zip -and (Test-Path $LocalEDK2Zip)) {
+        'Using local "{0}".' -f $EDK2ZipName
+        Copy-Item -Path $LocalEDK2Zip -Destination $ZIP_File -Force
     }
-    catch {
-        $_.Exception.Message
-        exit 1
+    else {
+        try {
+            'Downloading "{0}" from GitHub.' -f $EDK2ZipName
+            Invoke-WebRequest -UseBasicParsing -Uri $EDK2bin_URL -OutFile $ZIP_File
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
+        }
     }
 
     $DefaultBin_Files = @('Default3PDb.bin', 'DefaultDbx.bin', 'DefaultKek.bin', 'DefaultPk.bin')
@@ -585,29 +654,99 @@ function Download-EDK2bin {
     }
 }
 
-function Suspend-Bitlocker {
-    $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
+function Suspend-SystemBitLocker {
+    # Use persistent suspension so protectors stay disabled across reboots until explicitly resumed.
+    $PersistentRebootCount = 0
 
-    if ($ProtectionStatus -eq 'On') {
-        $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
+    $BitLockerVolumeCmd = Get-Command -Name 'Get-BitLockerVolume' -ErrorAction SilentlyContinue
+    $SuspendCmd = Get-Command -Name 'Suspend-BitLocker' -ErrorAction SilentlyContinue
+    $ManageBdeCmd = Get-Command -Name 'manage-bde.exe' -ErrorAction SilentlyContinue
 
-        if ($DeviceGuard_Running -eq 1) {
-            'Suspending BitLocker for two reboots (Device Guard).'
-            $RebootCount = 3
-        }
-        else {
-            'Suspending BitLocker for one reboot.'
-            $RebootCount = 1
+    $GetProtectionStatus = {
+        if (-not $BitLockerVolumeCmd) {
+            return $null
         }
 
         try {
-            $null = Suspend-Bitlocker -MountPoint $SystemDrive -RebootCount $RebootCount
+            return (Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop).ProtectionStatus
         }
         catch {
-            $_.Exception.Message
+            Write-Warning ('Unable to query BitLocker status on {0}: {1}' -f $SystemDrive, $_.Exception.Message)
+            return $null
+        }
+    }
+
+    $ProtectionStatus = & $GetProtectionStatus
+
+    if ($ProtectionStatus -eq 'On') {
+        'Disabling BitLocker protectors and blocking auto-reactivation across reboots.'
+    }
+    elseif ($ProtectionStatus -eq 'Off') {
+        'BitLocker is already OFF. Enforcing persistent OFF state across reboots.'
+    }
+    else {
+        'BitLocker status could not be determined. Applying persistent disable safeguards.'
+    }
+
+    $DisableApplied = $false
+
+    if ($SuspendCmd) {
+        try {
+            $null = Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $PersistentRebootCount -ErrorAction Stop
+            $DisableApplied = $true
+        }
+        catch {
+            Write-Warning ('Suspend-BitLocker failed, trying manage-bde fallback. Error: {0}' -f $_.Exception.Message)
+        }
+    }
+
+    if (-not $DisableApplied -and $ManageBdeCmd) {
+        $ManageBdeOutput = (& manage-bde.exe -protectors -disable $SystemDrive -RebootCount $PersistentRebootCount 2>&1 | Out-String)
+        $ManageBdeExitCode = $LASTEXITCODE
+
+        if ($ManageBdeExitCode -ne 0) {
+            Write-Host ('ERROR: manage-bde fallback failed (exit code {0}).' -f $ManageBdeExitCode) -ForegroundColor Red
+            if ($ManageBdeOutput) {
+                Write-Host $ManageBdeOutput -ForegroundColor Red
+            }
+            exit 1
+        }
+
+        $DisableApplied = $true
+        'BitLocker protectors disabled via manage-bde fallback (persistent mode).'
+    }
+
+    if (-not $DisableApplied) {
+        Write-Host 'ERROR: Unable to disable BitLocker protectors. Neither Suspend-BitLocker nor manage-bde.exe succeeded.' -ForegroundColor Red
+        exit 1
+    }
+
+    $VerificationStatus = & $GetProtectionStatus
+    if ($VerificationStatus -eq 'On') {
+        if (-not $ManageBdeCmd) {
+            Write-Host 'ERROR: BitLocker remains ON and manage-bde.exe is unavailable for enforcement.' -ForegroundColor Red
+            exit 1
+        }
+
+        $ManageBdeOutput = (& manage-bde.exe -protectors -disable $SystemDrive -RebootCount $PersistentRebootCount 2>&1 | Out-String)
+        $ManageBdeExitCode = $LASTEXITCODE
+        if ($ManageBdeExitCode -ne 0) {
+            Write-Host ('ERROR: BitLocker remains ON and manage-bde enforcement failed (exit code {0}).' -f $ManageBdeExitCode) -ForegroundColor Red
+            if ($ManageBdeOutput) {
+                Write-Host $ManageBdeOutput -ForegroundColor Red
+            }
+            exit 1
+        }
+
+        Start-Sleep -Seconds 2
+        $VerificationStatus = & $GetProtectionStatus
+        if ($VerificationStatus -eq 'On') {
+            Write-Host 'ERROR: BitLocker protection is still ON after persistent disable attempts. Aborting update for safety.' -ForegroundColor Red
             exit 1
         }
     }
+
+    'BitLocker protectors are disabled with persistent mode (RebootCount=0).'
 }
 
 function Set-SecureBootSignedFile {
@@ -646,7 +785,7 @@ function Set-SecureBootSignedFile {
     'Successfully wrote "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable
     $script:UEFI_Updated = $true
 
-    Suspend-Bitlocker
+    Suspend-SystemBitLocker
 }
 
 function Append-SecureBootSignedFile {
@@ -746,7 +885,7 @@ function Append-SecureBootSignedFile {
     'Successfully appended "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable.ToUpper()
     $script:UEFI_Updated = $true
 
-    Suspend-Bitlocker
+    Suspend-SystemBitLocker
     Remove-Item $SigFile,$ContentFile -Force
 }
 
@@ -851,6 +990,457 @@ function Match-DBXSignatureData {
     }
 }
 
+function Resolve-LocalCertPath {
+    param (
+        [Parameter(Mandatory)]
+        [string]$CertFile
+    )
+
+    $Candidates = @()
+
+    if ($PSScriptRoot) {
+        $Candidates += (Join-Path $PSScriptRoot $CertFile)
+        $Candidates += (Join-Path $PSScriptRoot 'certs' $CertFile)
+        $Candidates += (Join-Path $PSScriptRoot 'Certs' $CertFile)
+    }
+
+    if ($UpdatesFolder) {
+        $Candidates += (Join-Path $UpdatesFolder $CertFile)
+    }
+
+    if ($LocalRepo) {
+        $Candidates += (Join-Path $LocalRepo $CertFile)
+        $Candidates += (Join-Path $LocalRepo 'certs' $CertFile)
+        $Candidates += (Join-Path $LocalRepo 'Certs' $CertFile)
+    }
+
+    foreach ($Path in $Candidates) {
+        if (Test-Path -LiteralPath $Path) {
+            return $Path
+        }
+    }
+
+    return $null
+}
+
+function Invoke-FileStageAsSystem {
+    param (
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationPath,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$CopyChildren,
+
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 300
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        throw "Source path not found: $SourcePath"
+    }
+
+    $SourceItem = Get-Item -LiteralPath $SourcePath -ErrorAction Stop
+    $IsDirectory = $SourceItem.PSIsContainer
+
+    if ($CopyChildren -and -not $IsDirectory) {
+        throw "CopyChildren is only supported when SourcePath is a directory: $SourcePath"
+    }
+
+    $TaskId = [guid]::NewGuid().Guid.Substring(0,8)
+    $TaskName = "SBStage-$TaskId"
+
+    $StageWorkRoot = Join-Path $env:ProgramData 'SBStage'
+    if (-not (Test-Path -LiteralPath $StageWorkRoot)) {
+        $null = New-Item -Path $StageWorkRoot -ItemType Directory -Force
+    }
+
+    $ScriptFile = Join-Path $StageWorkRoot "$TaskName.ps1"
+    $DoneFile = Join-Path $StageWorkRoot "$TaskName.done"
+    $ErrorFile = Join-Path $StageWorkRoot "$TaskName.error"
+    $StageSourceRoot = Join-Path $StageWorkRoot "$TaskName-src"
+    $StageSourcePath = Join-Path $StageSourceRoot (Split-Path -Path $SourcePath -Leaf)
+    $EscScriptFile = $ScriptFile.Replace("'","''")
+
+    $EscStageSource = $StageSourcePath.Replace("'","''")
+    $EscDestination = $DestinationPath.Replace("'","''")
+    $EscDone = $DoneFile.Replace("'","''")
+    $EscError = $ErrorFile.Replace("'","''")
+
+    $RobocopyDestination = $null
+    $EscRoboDest = $null
+    $EscSourceLeaf = $null
+
+    if ($IsDirectory) {
+        if ($CopyChildren) {
+            $RobocopyDestination = $DestinationPath
+        }
+        else {
+            $RobocopyDestination = Join-Path $DestinationPath (Split-Path -Path $SourcePath -Leaf)
+        }
+
+        $EscRoboDest = $RobocopyDestination.Replace("'","''")
+    }
+    else {
+        $EscRoboDest = $EscDestination
+        $EscSourceLeaf = (Split-Path -Path $SourcePath -Leaf).Replace("'","''")
+    }
+
+    if (Test-Path -LiteralPath $StageSourceRoot) {
+        Remove-Item -LiteralPath $StageSourceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $null = New-Item -Path $StageSourceRoot -ItemType Directory -Force
+
+    if ($IsDirectory) {
+        Copy-Item -Path $SourcePath -Destination $StageSourceRoot -Recurse -Force
+
+        $CopyCommand = @"
+if (-not (Test-Path -LiteralPath '$EscRoboDest')) {
+    `$null = New-Item -Path '$EscRoboDest' -ItemType Directory -Force -ErrorAction SilentlyContinue
+}
+
+`$null = & robocopy '$EscStageSource' '$EscRoboDest' * /E /B /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+`$rc = `$LASTEXITCODE
+if (`$rc -ge 8) {
+    throw "Robocopy failed with exit code `$rc (source '$EscStageSource' -> destination '$EscRoboDest')."
+}
+"@
+    }
+    else {
+        Copy-Item -LiteralPath $SourcePath -Destination $StageSourcePath -Force
+
+        $CopyCommand = @"
+`$null = & robocopy '$StageSourceRoot' '$EscRoboDest' '$EscSourceLeaf' /B /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
+`$rc = `$LASTEXITCODE
+if (`$rc -ge 8) {
+    throw "Robocopy failed with exit code `$rc (source '$StageSourceRoot\\$EscSourceLeaf' -> destination '$EscRoboDest\\$EscSourceLeaf')."
+}
+"@
+    }
+
+    $SystemScript = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    if (-not (Test-Path -LiteralPath '$EscDestination')) {
+        `$null = New-Item -Path '$EscDestination' -ItemType Directory -Force
+    }
+
+    $CopyCommand
+
+    'OK' | Set-Content -LiteralPath '$EscDone' -Encoding Ascii -Force
+}
+catch {
+    (`$_ | Out-String) | Set-Content -LiteralPath '$EscError' -Encoding Ascii -Force
+    exit 1
+}
+"@
+
+    Set-Content -LiteralPath $ScriptFile -Value $SystemScript -Encoding Ascii -Force
+
+    "[SYSTEM-STAGE] Source: $SourcePath"
+    "[SYSTEM-STAGE] StagedSource: $StageSourcePath"
+    "[SYSTEM-STAGE] Destination: $DestinationPath"
+    if ($IsDirectory) {
+        "[SYSTEM-STAGE] Mode: Directory"
+        "[SYSTEM-STAGE] RobocopyDestination: $RobocopyDestination"
+    }
+    else {
+        "[SYSTEM-STAGE] Mode: File"
+    }
+    "[SYSTEM-STAGE] Script: $ScriptFile"
+    "[SYSTEM-STAGE] Markers: $DoneFile ; $ErrorFile"
+
+    try {
+        $ScheduleSvc = Get-Service -Name Schedule -ErrorAction SilentlyContinue
+        if ($null -eq $ScheduleSvc) {
+            throw 'Task Scheduler service (Schedule) was not found.'
+        }
+
+        if ($ScheduleSvc.Status -ne 'Running') {
+            Start-Service -Name Schedule -ErrorAction Stop
+        }
+
+        $StartTime = (Get-Date).AddMinutes(5).ToString('HH:mm')
+        $RunCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ScriptFile"
+
+        $null = & schtasks.exe /Create /TN $TaskName /SC ONCE /ST $StartTime /RL HIGHEST /RU SYSTEM /TR $RunCmd /F
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create SYSTEM staging task '$TaskName' (exit code $LASTEXITCODE)."
+        }
+
+        $null = & schtasks.exe /Run /TN $TaskName
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to run SYSTEM staging task '$TaskName' (exit code $LASTEXITCODE)."
+        }
+
+        $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        $NextWaitPrint = (Get-Date).AddSeconds(15)
+        $NoMarkerDeadline = (Get-Date).AddSeconds([Math]::Min(120, [Math]::Max(45, [int]($TimeoutSeconds / 2))))
+
+        while ((Get-Date) -lt $Deadline) {
+            if (Test-Path -LiteralPath $DoneFile) {
+                return $true
+            }
+
+            if (Test-Path -LiteralPath $ErrorFile) {
+                throw (Get-Content -LiteralPath $ErrorFile -Raw)
+            }
+
+            if ((Get-Date) -ge $NextWaitPrint) {
+                "[SYSTEM-STAGE] Waiting for completion markers..."
+                $NextWaitPrint = (Get-Date).AddSeconds(15)
+            }
+
+            if ((Get-Date) -ge $NoMarkerDeadline) {
+                $TaskQuery = (& schtasks.exe /Query /TN $TaskName /V /FO LIST 2>$null) -join "`n"
+                throw "SYSTEM staging produced no completion markers after extended wait. Task may be blocked from launching PowerShell payload.`n$TaskQuery"
+            }
+
+            Start-Sleep -Milliseconds 500
+        }
+
+        $TaskQuery = (& schtasks.exe /Query /TN $TaskName /V /FO LIST) -join "`n"
+        if (Test-Path -LiteralPath $ErrorFile) {
+            throw (Get-Content -LiteralPath $ErrorFile -Raw)
+        }
+
+        throw "SYSTEM staging timed out after $TimeoutSeconds seconds.`n$TaskQuery"
+    }
+    finally {
+        $null = & schtasks.exe /Delete /TN $TaskName /F 2>$null
+        Remove-Item -LiteralPath $ScriptFile,$DoneFile,$ErrorFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $StageSourceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-PreReqStaging {
+    param (
+        [Parameter(Mandatory)]
+        [string]$Reason
+    )
+
+    $LocalRepoPath = $LocalRepo
+    if (-not $LocalRepoPath -and $PSScriptRoot) {
+        $LocalRepoPath = Join-Path $PSScriptRoot 'Certs'
+    }
+
+    $SourceRoots = @()
+    if ($PSScriptRoot) {
+        $SourceRoots += (Join-Path $PSScriptRoot 'Certs')
+        $SourceRoots += $PSScriptRoot
+    }
+    if ($LocalRepoPath) {
+        $SourceRoots += $LocalRepoPath
+    }
+    if ($UpdatesFolder) {
+        $SourceRoots += $UpdatesFolder
+    }
+
+    $SourceRoots = $SourceRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+
+    '[SYSTEM-STAGE] Candidate source roots:'
+    $SourceRoots | ForEach-Object { "[SYSTEM-STAGE] - $_" }
+
+    $EFIEX_SourceCandidates = @()
+    $SecureBootUpdates_SourceCandidates = @()
+    $BCDBoot_SourceCandidates = @()
+    $BCDBootMui_SourceCandidates = @()
+
+    foreach ($Root in $SourceRoots) {
+        $EFIEX_SourceCandidates += (Join-Path $Root 'EFI_EX')
+        $EFIEX_SourceCandidates += (Join-Path $Root 'Certs\EFI_EX')
+
+        $SecureBootUpdates_SourceCandidates += (Join-Path $Root 'SecureBootUpdates')
+        $SecureBootUpdates_SourceCandidates += (Join-Path $Root 'Certs\SecureBootUpdates')
+
+        $BCDBoot_SourceCandidates += (Join-Path $Root 'bcdboot.exe')
+        $BCDBoot_SourceCandidates += (Join-Path $Root 'Certs\bcdboot.exe')
+
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'bcdboot.exe.mui')
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'fr-FR\bcdboot.exe.mui')
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'Certs\bcdboot.exe.mui')
+        $BCDBootMui_SourceCandidates += (Join-Path $Root 'Certs\fr-FR\bcdboot.exe.mui')
+    }
+
+    $EFIEX_Source = $EFIEX_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $SecureBootUpdates_Source = $SecureBootUpdates_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $BCDBoot_Source = $BCDBoot_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $BCDBootMui_Source = $BCDBootMui_SourceCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+    if (-not $EFIEX_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path (Join-Path $PSScriptRoot 'Certs') -Directory -Filter 'EFI_EX' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $EFIEX_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
+    if (-not $SecureBootUpdates_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path (Join-Path $PSScriptRoot 'Certs') -Directory -Filter 'SecureBootUpdates' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $SecureBootUpdates_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
+    if (-not $BCDBoot_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path $PSScriptRoot -File -Filter 'bcdboot.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $BCDBoot_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
+    if (-not $BCDBootMui_Source -and $PSScriptRoot) {
+        try {
+            $Found = Get-ChildItem -Path $PSScriptRoot -File -Filter 'bcdboot.exe.mui' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($Found) { $BCDBootMui_Source = $Found.FullName }
+        }
+        catch {}
+    }
+
+    "[SYSTEM-STAGE] Resolved EFI_EX source: $EFIEX_Source"
+    "[SYSTEM-STAGE] Resolved SecureBootUpdates source: $SecureBootUpdates_Source"
+    "[SYSTEM-STAGE] Resolved bcdboot.exe source: $BCDBoot_Source"
+    "[SYSTEM-STAGE] Resolved bcdboot.exe.mui source: $BCDBootMui_Source"
+
+    if ($EFIEX_Source) {
+        Invoke-FileStageAsSystem -SourcePath $EFIEX_Source -DestinationPath "$env:SystemRoot\Boot"
+        'Staged EFI_EX into "{0}" from "{1}".' -f "$env:SystemRoot\Boot", $EFIEX_Source
+    }
+    else {
+        Write-Warning 'Unable to find local EFI_EX folder to stage.'
+    }
+
+    $SecureBootUpdates_Dest = "$env:SystemRoot\System32\SecureBootUpdates"
+
+    if (-not (Test-Path -LiteralPath $SecureBootUpdates_Dest)) {
+        $null = New-Item -Path $SecureBootUpdates_Dest -ItemType Directory -Force
+    }
+
+    if ($SecureBootUpdates_Source) {
+        Invoke-FileStageAsSystem -SourcePath $SecureBootUpdates_Source -DestinationPath $SecureBootUpdates_Dest -CopyChildren
+        'Staged SecureBootUpdates into "{0}" from "{1}".' -f $SecureBootUpdates_Dest, $SecureBootUpdates_Source
+    }
+    else {
+        Write-Warning 'Unable to find local SecureBootUpdates folder to stage.'
+    }
+
+    if ($BCDBoot_Source) {
+        Invoke-FileStageAsSystem -SourcePath $BCDBoot_Source -DestinationPath "$env:SystemRoot\System32"
+        'Staged bcdboot.exe into "{0}" from "{1}".' -f "$env:SystemRoot\System32", $BCDBoot_Source
+    }
+    else {
+        Write-Warning 'Unable to find local bcdboot.exe to stage.'
+    }
+
+    if ($BCDBootMui_Source) {
+        Invoke-FileStageAsSystem -SourcePath $BCDBootMui_Source -DestinationPath "$env:SystemRoot\System32\fr-FR"
+        'Staged bcdboot.exe.mui into "{0}" from "{1}".' -f "$env:SystemRoot\System32\fr-FR", $BCDBootMui_Source
+    }
+    else {
+        Write-Warning 'Unable to find local bcdboot.exe.mui to stage.'
+    }
+
+    $SecureBootReg = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot'
+    $null = New-Item -Path $SecureBootReg -Force
+    $null = New-ItemProperty -Path $SecureBootReg -Name 'AvailableUpdates' -PropertyType DWord -Value 0x5944 -Force
+
+    'Set registry: HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\AvailableUpdates = 0x5944.'
+    "Minimum UBR prerequisite not met: $Reason"
+    'After OS upgrade/KB compliance, use AvailableUpdates=0x5944 and run \\Microsoft\\Windows\\PI\\Secure-Boot-Update per KB5068202.'
+}
+
+
+function Populate-LocalRepo {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$LocalRepoPath
+    )
+
+    if (-not (Test-Path -LiteralPath $LocalRepoPath)) {
+        New-Item -Path $LocalRepoPath -ItemType Directory -Force | Out-Null
+    }
+
+    $ToFetch = @()
+
+    $ToFetch += @{ url = $KEKUpdateMap_URL; name = (Split-Path $KEKUpdateMap_URL -Leaf) }
+    $ToFetch += @{ url = $KEK_DER_URL; name = (Split-Path $KEK_DER_URL -Leaf) }
+    $ToFetch += @{ url = $PK_DER_URL; name = (Split-Path $PK_DER_URL -Leaf) }
+    $ToFetch += @{ url = $EDK2bin_URL; name = (Split-Path $EDK2bin_URL -Leaf) }
+    $ToFetch += @{ url = $DBXUpdate_bin_URL; name = (Split-Path $DBXUpdate_bin_URL -Leaf) }
+    $ToFetch += @{ url = $DBXUpdateSVN_bin_URL; name = (Split-Path $DBXUpdateSVN_bin_URL -Leaf) }
+
+    foreach ($item in $ToFetch) {
+        $name = $item.name -replace '%20',' '
+        $dest = Join-Path $LocalRepoPath $name
+
+        if (Test-Path -LiteralPath $dest) { continue }
+
+        try {
+            'Downloading "{0}" to "{1}".' -f $name, $LocalRepoPath
+            Invoke-WebRequest -UseBasicParsing -Uri $item.url -OutFile $dest
+        }
+        catch {
+            Write-Warning ("Warning: failed to download {0}: {1}" -f $item.url, $_.Exception.Message)
+        }
+    }
+
+    # If we have a kek_update_map.json locally, attempt to download any referenced KEK update files
+    $MapName = (Split-Path $KEKUpdateMap_URL -Leaf)
+    $MapPath = Join-Path $LocalRepoPath $MapName
+    if (Test-Path $MapPath) {
+        try {
+            $mapJson = Get-Content -Raw -Path $MapPath | ConvertFrom-Json
+            $kekFiles = @()
+
+            foreach ($prop in $mapJson.PSObject.Properties) {
+                $val = $prop.Value
+                if ($null -ne $val -and $val.PSObject.Properties.Name -contains 'KEKUpdate') {
+                    $update = $val.KEKUpdate
+                    if ($update) { $kekFiles += $update }
+                }
+            }
+
+            $kekFiles = $kekFiles | Where-Object { $_ } | Sort-Object -Unique
+
+            foreach ($entry in $kekFiles) {
+                try {
+                    $parts = $entry -split '/'
+                    if ($parts.Count -eq 2) {
+                        $vendor = $parts[0]
+                        $file = $parts[1]
+                        $kekDestFolder = Join-Path $LocalRepoPath 'KEK'
+                        $kekVendorFolder = Join-Path $kekDestFolder $vendor
+                        if (-not (Test-Path $kekVendorFolder)) { New-Item -Path $kekVendorFolder -ItemType Directory -Force | Out-Null }
+
+                        $localPath1 = Join-Path $LocalRepoPath $file
+                        $localPath2 = Join-Path $kekDestFolder $file
+                        $localPath3 = Join-Path $kekVendorFolder $file
+
+                        if ((Test-Path $localPath1) -or (Test-Path $localPath2) -or (Test-Path $localPath3)) { continue }
+
+                        $remote = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/$entry"
+                        'Downloading KEK update "{0}"' -f $entry
+                        Invoke-WebRequest -UseBasicParsing -Uri $remote -OutFile $localPath3 -ErrorAction Stop
+                        # copy to top-level local repo for convenience
+                        Copy-Item -Path $localPath3 -Destination $localPath1 -Force
+                    }
+                }
+                catch {
+                    Write-Warning ("Failed to fetch KEK entry {0}: {1}" -f $entry, $_.Exception.Message)
+                }
+            }
+        }
+        catch {
+            Write-Warning ("Failed to parse KEK map for additional downloads: {0}" -f $_.Exception.Message)
+        }
+    }
+}
+
 function Update-PK_Cert {
     # Pre-signed object for Windows OEM Devices PK
 
@@ -859,8 +1449,16 @@ function Update-PK_Cert {
 
     if (-not (Test-Path -LiteralPath "$EFI_FolderPath\$CertFile")) {
         try {
-            'Downloading "{0}" from GitHub.' -f $CertFile
-            Invoke-WebRequest -UseBasicParsing -Uri $PK_DER_URL -OutFile $PreSignedObj_File
+            $LocalCertPath = Resolve-LocalCertPath -CertFile $CertFile
+
+            if ($LocalCertPath) {
+                'Using local "{0}" from "{1}".' -f $CertFile, $LocalCertPath
+                Copy-Item -Path $LocalCertPath -Destination $PreSignedObj_File -Force
+            }
+            else {
+                'Downloading "{0}" from GitHub.' -f $CertFile
+                Invoke-WebRequest -UseBasicParsing -Uri $PK_DER_URL -OutFile $PreSignedObj_File
+            }
         }
         catch {
             $_.Exception.Message
@@ -881,13 +1479,50 @@ function Update-PK_Cert {
 }
 
 function Update-KEK_Cert {
-    try {
-        $JSON = (Invoke-WebRequest -UseBasicParsing -Uri $KEKUpdateMap_URL).Content | ConvertFrom-Json
+    # Attempt to load kek_update_map.json from a local repo when provided (offline support)
+    $JSON = $null
+    $MapFileName = (Split-Path $KEKUpdateMap_URL -Leaf)
+    $MapCandidates = @()
+
+    if ($LocalRepo) {
+        $MapCandidates += Join-Path $LocalRepo $MapFileName
+        $MapCandidates += Join-Path $LocalRepo ("KEK\\$MapFileName")
     }
-    catch {
-        "`nERROR: Unable to parse Microsoft's KEK update map."
-        Write-Host (($_.Exception.Message -split "`n") | select -First 1) -Foreground Red
-        exit 1
+
+    if ($PSScriptRoot) {
+        $MapCandidates += Join-Path $PSScriptRoot $MapFileName
+        $MapCandidates += Join-Path $PSScriptRoot ("Certs\\$MapFileName")
+        $MapCandidates += Join-Path $PSScriptRoot ("KEK\\$MapFileName")
+        $MapCandidates += Join-Path $PSScriptRoot ("Certs\\KEK\\$MapFileName")
+    }
+
+    if ($UpdatesFolder) {
+        $MapCandidates += Join-Path $UpdatesFolder $MapFileName
+        $MapCandidates += Join-Path $UpdatesFolder ("KEK\\$MapFileName")
+    }
+
+    $MapLocalPath = $MapCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+    if ($MapLocalPath) {
+        try {
+            $JSON = Get-Content -Raw -Path $MapLocalPath | ConvertFrom-Json
+            'Using local KEK update map "{0}".' -f $MapLocalPath
+        }
+        catch {
+            Write-Warning ("Unable to parse local KEK update map ({0}). Falling back to default local KEK cert workflow. Error: {1}" -f $MapLocalPath, (($_.Exception.Message -split "`n") | Select-Object -First 1))
+            $JSON = $null
+        }
+    }
+
+    if (-not $JSON) {
+        try {
+            $JSON = (Invoke-WebRequest -UseBasicParsing -Uri $KEKUpdateMap_URL).Content | ConvertFrom-Json
+            'Using online KEK update map from Microsoft.'
+        }
+        catch {
+            Write-Warning ("Unable to fetch/parse Microsoft's KEK update map. Falling back to default local KEK cert workflow. Error: {0}" -f (($_.Exception.Message -split "`n") | Select-Object -First 1))
+            $JSON = $null
+        }
     }
 
     try {
@@ -909,16 +1544,73 @@ function Update-KEK_Cert {
         $Vendor = $array[0]
         $KEK_Update = $array[1]
 
-        $KEK_BIN_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/$Vendor/$KEK_Update"
-        $PostSignedObj_File = "$env:TEMP\$KEK_Update"
+        # Decode URL-encoded filename for local filesystem checks (e.g., %20 -> space)
+        $KEK_Update_Local = $KEK_Update -replace '%20',' '
 
-        try {
-            'Downloading "{0}" from GitHub.' -f $KEK_Update
-            Invoke-WebRequest -UseBasicParsing -Uri $KEK_BIN_URL -OutFile $PostSignedObj_File
+        $KEK_BIN_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/$Vendor/$KEK_Update"
+        $PostSignedObj_File = "$env:TEMP\$KEK_Update_Local"
+
+        # Prefer a local copy of the post-signed KEK update when available (check KEK subfolders)
+        $LocalKEKBinCandidates = @()
+        if ($LocalRepo) {
+            $LocalKEKBinCandidates += Join-Path $LocalRepo $KEK_Update_Local
+            $LocalKEKBinCandidates += Join-Path $LocalRepo ("KEK\\$KEK_Update_Local")
         }
-        catch {
-            Write-Host $_.Exception.Message -Foreground Red
-            exit 1
+        if ($PSScriptRoot) {
+            $LocalKEKBinCandidates += Join-Path $PSScriptRoot $KEK_Update_Local
+            $LocalKEKBinCandidates += Join-Path $PSScriptRoot ("KEK\\$KEK_Update_Local")
+        }
+        if ($UpdatesFolder) {
+            $LocalKEKBinCandidates += Join-Path $UpdatesFolder $KEK_Update_Local
+            $LocalKEKBinCandidates += Join-Path $UpdatesFolder ("KEK\\$KEK_Update_Local")
+        }
+
+        $LocalKEKBin = $LocalKEKBinCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+        # If not found in the candidate paths, try a recursive search under common local roots
+        if (-not $LocalKEKBin) {
+            $searchRoots = @()
+            if ($LocalRepo) { $searchRoots += $LocalRepo }
+            if ($PSScriptRoot) { $searchRoots += $PSScriptRoot }
+            if ($UpdatesFolder) { $searchRoots += $UpdatesFolder }
+
+            foreach ($root in $searchRoots) {
+                if ($LocalKEKBin) { break }
+                if (Test-Path -LiteralPath $root) {
+                    try {
+                        $found = Get-ChildItem -Path $root -Filter $KEK_Update_Local -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($found) {
+                            $LocalKEKBin = $found.FullName
+                            'Found local KEK via recursive search: {0}' -f $LocalKEKBin
+                            break
+                        }
+                    }
+                    catch {
+                        # ignore and continue
+                    }
+                }
+            }
+        }
+
+        if ($LocalKEKBin) {
+            'Using local "{0}".' -f (Split-Path $LocalKEKBin -Leaf)
+            Copy-Item -Path $LocalKEKBin -Destination $PostSignedObj_File -Force
+        }
+        else {
+            # Diagnostic: list candidate local paths and whether they exist
+            'Local KEK candidates (path -> exists):'
+            foreach ($c in $LocalKEKBinCandidates) {
+                Write-Host ("{0} -> {1}" -f $c, (Test-Path -LiteralPath $c))
+            }
+
+            try {
+                'Downloading "{0}" from GitHub.' -f $KEK_Update
+                Invoke-WebRequest -UseBasicParsing -Uri $KEK_BIN_URL -OutFile $PostSignedObj_File
+            }
+            catch {
+                Write-Host $_.Exception.Message -Foreground Red
+                exit 1
+            }
         }
 
         Append-SecureBootSignedFile -Variable KEK -Filename $PostSignedObj_File
@@ -933,8 +1625,30 @@ function Update-KEK_Cert {
 
         if (-not (Test-Path -LiteralPath "$EFI_FolderPath\$CertFile")) {
             try {
-                'Downloading "{0}" from GitHub.' -f $CertFile
-                Invoke-WebRequest -UseBasicParsing -Uri $KEK_DER_URL -OutFile $PreSignedObj_File
+                $LocalCertPath = Resolve-LocalCertPath -CertFile $CertFile
+
+                if ($LocalCertPath) {
+                    'Using local "{0}" from "{1}".' -f $CertFile, $LocalCertPath
+                    Copy-Item -Path $LocalCertPath -Destination $PreSignedObj_File -Force
+                }
+                else {
+                    # Prefer local KEK cert when available
+                    $LocalKEKDer = $null
+                    $KEKDerName = ($KEK_DER_URL -split '/')[-1]
+                    $KEKDerName = $KEKDerName -replace '%20',' '
+                    if ($LocalRepo) { $LocalKEKDer = Join-Path $LocalRepo $KEKDerName }
+                    if (-not $LocalKEKDer -and $PSScriptRoot) { $LocalKEKDer = Join-Path $PSScriptRoot $KEKDerName }
+                    if (-not $LocalKEKDer -and $UpdatesFolder) { $LocalKEKDer = Join-Path $UpdatesFolder $KEKDerName }
+
+                    if ($LocalKEKDer -and (Test-Path $LocalKEKDer)) {
+                        'Using local "{0}".' -f $KEKDerName
+                        Copy-Item -Path $LocalKEKDer -Destination $PreSignedObj_File -Force
+                    }
+                    else {
+                        'Downloading "{0}" from GitHub.' -f $CertFile
+                        Invoke-WebRequest -UseBasicParsing -Uri $KEK_DER_URL -OutFile $PreSignedObj_File
+                    }
+                }
             }
             catch {
                 Write-Host $_.Exception.Message -Foreground Red
@@ -975,6 +1689,35 @@ function Print-Header {
     return ("{0}`n{1}" -f $Header, ($Header -replace "`n" -replace '(.)',$Separator))
 }
 
+function Invoke-BCDBootWithFallback {
+    param (
+        [Parameter(Mandatory)]
+        [string]$WindowsPath,
+
+        [Parameter(Mandatory)]
+        [string]$SystemPartition
+    )
+
+    # First try /bootex for CA 2023-aware boot files, then gracefully fallback for older bcdboot builds.
+    $PrimaryArgs = @($WindowsPath, '/s', $SystemPartition, '/f', 'UEFI', '/bootex')
+    $PrimaryOutput = (& bcdboot @PrimaryArgs 2>&1 | Out-String)
+    $PrimaryExitCode = $LASTEXITCODE
+
+    if ($PrimaryExitCode -eq 0 -and $PrimaryOutput -notmatch '(?im)^Bcdboot\s-') {
+        return
+    }
+
+    'BCDBoot /bootex failed or is unsupported on this build. Retrying without /bootex.'
+
+    $FallbackArgs = @($WindowsPath, '/s', $SystemPartition, '/f', 'UEFI')
+    $FallbackOutput = (& bcdboot @FallbackArgs 2>&1 | Out-String)
+    $FallbackExitCode = $LASTEXITCODE
+
+    if ($FallbackExitCode -ne 0 -or $FallbackOutput -match '(?im)^Bcdboot\s-') {
+        throw "BCDBoot failed. ExitCode=$FallbackExitCode`n$FallbackOutput"
+    }
+}
+
 $ScriptBlock = {
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
 
@@ -983,11 +1726,28 @@ $ScriptBlock = {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $ProgressPreference = 'SilentlyContinue'
 
+    # Ensure LocalRepo defaults to ./Certs under script root. Populate only when -DownloadContent (opt-in)
+    if (-not $LocalRepo) { $LocalRepo = Join-Path $PSScriptRoot 'Certs' }
+
+    if (-not (Test-Path -LiteralPath $LocalRepo)) {
+        New-Item -Path $LocalRepo -ItemType Directory -Force | Out-Null
+    }
+
+    if ($DownloadContent -or $Offline) {
+        Populate-LocalRepo -LocalRepoPath $LocalRepo
+    }
+
     $Result = Confirm-MinimumUBR
 
     if ($Result -ne $true) {
-        "ERROR: $Result.`n"
-        exit 1
+        Write-Warning ('Minimum Windows UBR check failed, but continuing by default: {0}' -f $Result)
+
+        try {
+            Invoke-PreReqStaging -Reason $Result
+        }
+        catch {
+            Write-Warning ('Pre-requisite staging failed after minimum UBR check failure: {0}' -f $_.Exception.Message)
+        }
     }
 
     $SecureBoot = Confirm-SecureBootUEFI
@@ -1034,7 +1794,14 @@ $ScriptBlock = {
     $PK_Trusted = Check-TrustedPK
 
     $SystemDisk = (Get-Disk | Where-Object {$_.IsSystem -eq $true}).Number
-    $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
+    $SystemPartition = Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' } | Select-Object -First 1
+
+    if (-not $SystemPartition) {
+        Write-Host 'ERROR: System partition not found. Unable to locate EFI volume.' -Foreground Red
+        exit 1
+    }
+
+    $GUID = $SystemPartition.Guid
 
     $EFI_Path = "\\?\Volume$GUID\EFI"
     $EFI_FolderPath = "$EFI_Path\Certs"
@@ -1122,9 +1889,36 @@ $ScriptBlock = {
         }
 
         if ($Latest) {
+            # Prefer local DBX files when available (offline support)
+            $LocalDBX = $null
+            $LocalDBXSVN = $null
+            if ($LocalRepo) {
+                $LocalDBX = Join-Path $LocalRepo 'DBXUpdate.bin'
+                $LocalDBXSVN = Join-Path $LocalRepo 'DBXUpdateSVN.bin'
+            }
+            if (-not $LocalDBX -and $PSScriptRoot) {
+                $LocalDBX = Join-Path $PSScriptRoot 'DBXUpdate.bin'
+                $LocalDBXSVN = Join-Path $PSScriptRoot 'DBXUpdateSVN.bin'
+            }
+            if (-not $LocalDBX -and $UpdatesFolder) {
+                $LocalDBX = Join-Path $UpdatesFolder 'DBXUpdate.bin'
+                $LocalDBXSVN = Join-Path $UpdatesFolder 'DBXUpdateSVN.bin'
+            }
+
             try {
-                Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_bin_URL -OutFile "$env:TEMP\DBXUpdate.bin"
-                Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdateSVN_bin_URL -OutFile "$env:TEMP\DBXUpdateSVN.bin"
+                if ($LocalDBX -and (Test-Path $LocalDBX)) {
+                    Copy-Item -Path $LocalDBX -Destination "$env:TEMP\DBXUpdate.bin" -Force
+                }
+                else {
+                    Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_bin_URL -OutFile "$env:TEMP\DBXUpdate.bin"
+                }
+
+                if ($LocalDBXSVN -and (Test-Path $LocalDBXSVN)) {
+                    Copy-Item -Path $LocalDBXSVN -Destination "$env:TEMP\DBXUpdateSVN.bin" -Force
+                }
+                else {
+                    Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdateSVN_bin_URL -OutFile "$env:TEMP\DBXUpdateSVN.bin"
+                }
             }
             catch {
                 $_.Exception.Message
@@ -1166,7 +1960,7 @@ $ScriptBlock = {
         }
     }
 
-    if (($Revoke -and $VBS_Enabled) -or $SkuSiPolicy) {
+    if ($VBS_Enabled -or $SkuSiPolicy) {
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
             $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
             $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
@@ -1228,7 +2022,7 @@ $ScriptBlock = {
 
                 try {
                     Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
-                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+                    Invoke-BCDBootWithFallback -WindowsPath $env:SystemRoot -SystemPartition $EFI_DriveLetter
                     Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
                 }
                 catch {
@@ -1238,7 +2032,7 @@ $ScriptBlock = {
             }
             else {
                 try {
-                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+                    Invoke-BCDBootWithFallback -WindowsPath $env:SystemRoot -SystemPartition $EFI_DriveLetter
                 }
                 catch {
                     $_.Exception.Message
@@ -1291,7 +2085,7 @@ $ScriptBlock = {
 
                          try {
                              Copy-Item "${DriveLetter}:\EFI\Microsoft\Boot\BCD" $env:TEMP -Force
-                             Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /f UEFI /s $DriveLetter /bootex" -NoNewWindow -Wait
+                             Invoke-BCDBootWithFallback -WindowsPath $env:SystemRoot -SystemPartition $DriveLetter
                              Copy-Item "$env:TEMP\BCD" "${DriveLetter}:\EFI\Microsoft\Boot\BCD" -Force
                              Remove-Item "$env:TEMP\BCD" -Force
                          }
@@ -1310,6 +2104,8 @@ $ScriptBlock = {
     }
 
     if ($UEFI_Updated -or $PK_README -or $KEK_README) {
+        Reset-UpdatedMarkerState
+
         if ($UEFI_Updated -or $Latest) {
             Write-Output ''
         }
@@ -1338,6 +2134,8 @@ $ScriptBlock = {
         if ($Latest) {
             Write-Output ''
         }
+
+        Write-UpdatedMarkerAfterTwoReboots
 
        'SUCCESS: NO UPDATES ARE REQUIRED.'
     }

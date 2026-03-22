@@ -697,7 +697,6 @@ function Audit-UEFI {
 
     if ($Result -ne $true) {
         $CheckList += "{0,-3} {1}`n" -f ('{0}.' -f $index++), $Result
-        $NotMinimumUBR = $true
     }
 
     if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
