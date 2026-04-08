@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.01.18
+.VERSION 2026.04.08
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.01.18'
+$ScriptVersion = '2026.04.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -89,7 +89,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         $args += ' ' + ($MyInvocation.BoundParameters.'Paths' | foreach { '"{0}"' -f (Get-Item $_ -ErrorAction SilentlyContinue).FullName }) -join ' '
     }
 
-    Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f $($MyInvocation.MyCommand.Path) $args" -Verb RunAs
+    Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
     exit 0
 }
 
@@ -97,6 +97,9 @@ if ($PSBoundParameters['Verbose']) {
     $Verbose = $true
     $VerbosePreference = 'SilentlyContinue'
 }
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$ProgressPreference = 'SilentlyContinue'
 
 function Get-UefiDatabaseSignatures {
     <#
@@ -291,7 +294,7 @@ function Get-SecureBootUEFI_DBXSVN {
         $SignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
     }
     catch {
-        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+        if ($_.Exception.Message -match '0xC0000100') {
             return $null
         }
         else {
@@ -432,7 +435,6 @@ function Compare-DBXSignatureData {
         }
     }
 
-
     if ($EFI_SigCount -and $SVN_SigCount) {
         $SigType = 'EFI/SVN'
     }
@@ -465,16 +467,12 @@ function Compare-DBXSignatureData {
     }
 }
 
-
 switch ($env:PROCESSOR_ARCHITECTURE) {
     'amd64' { $Arch = 'x64' }
     'x86'   { $Arch = 'x86' }
     'arm64' { $Arch = 'aa64' }
     'arm'   { $Arch = 'aa32' }
 }
-
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$ProgressPreference = 'SilentlyContinue'
 
 if ($Verbose) {
     try {
@@ -502,8 +500,8 @@ try {
     $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
 }
 catch {
-    if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
-        $Result = "FAILED: UEFI DBX variable is currently empty.`n"
+    if ($_.Exception.Message -match '0xC0000100') {
+        $Result = "UEFI DBX variable is currently empty.`n"
         Write-Host $Result -Foreground Red
 
         if ($Log) {
