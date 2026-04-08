@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.01.18
+.VERSION 2026.04.08
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -98,7 +98,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.01.18'
+$ScriptVersion = '2026.04.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -118,7 +118,7 @@ switch ($Arch) {
     'arm'   { $EDK2_Arch = 'arm' }
 }
 
-$EDK2bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/v1.6.2/edk2-${EDK2_Arch}-secureboot-binaries.zip"
+$EDK2bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/v1.6.4/edk2-${EDK2_Arch}-secureboot-binaries.zip"
 $PK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/PK/Certificate/WindowsOEMDevicesPK.der'
 
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
@@ -148,9 +148,12 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         $args += ' -UpdatesFolder "{0}"' -f (Get-Item $MyInvocation.BoundParameters.'UpdatesFolder' -ErrorAction SilentlyContinue).FullName
     }
 
-    Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f $($MyInvocation.MyCommand.Path) $args" -Verb RunAs
+    Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
     exit 0
 }
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$ProgressPreference = 'SilentlyContinue'
 
 function Confirm-MinimumUBR {
     $Build = $CurrentVersion.CurrentBuildNumber
@@ -158,6 +161,18 @@ function Confirm-MinimumUBR {
     $Release = $CurrentVersion.DisplayVersion
 
     switch ($Build) {
+        14393 {
+            if ($UBR -lt 8519) {
+                return "Update W10 $Release to KB5066836 (Oct 2025) or later"
+            }
+        }
+
+        17763 {
+            if ($UBR -lt 7919 ) {
+                return "Update W10 $Release to KB5066586 (Oct 2025) or later"
+            }
+        }
+
         { $_ -in 19044,19045 } {
             if ($UBR -lt 6456) {
                 return "Update W10 $Release to KB5066791 (Oct 2025) or later"
@@ -182,8 +197,16 @@ function Confirm-MinimumUBR {
             }
         }
 
+        28000 {
+            return $true
+        }
+
+        { $_ -gt 26200 } {
+            return "Cannot confirm if W11 $Release (${Build}.$UBR) has the latest files"
+        }
+
         default {
-            return ('Build {0}.{1} is unsupported' -f $Build, $UBR)
+            return "Windows $Release ${Build}.$UBR is unsupported"
         }
     }
 
@@ -194,10 +217,11 @@ function Get-UefiDatabaseSignatures {
     <#
         .SYNOPSIS
         Parses UEFI Signature Databases into logical Powershell objects
-        # https://github.com/cjee21/Check-UEFISecureBootVariables
 
         .DESCRIPTION
-        Original Author: Matthew Graeber (@mattifestation)
+        https://github.com/cjee21/Check-UEFISecureBootVariables
+
+        Author: Matthew Graeber (@mattifestation)
         Modified By: Jeremiah Cox (@int0x6)
         Modified By: Joel Roth (@nafai)
         Modified By: garlin (@garlin-cant-code)
@@ -372,7 +396,7 @@ function Get-UEFICert {
         $SignatureList = (Get-SecureBootUEFI $Variable | Get-UefiDatabaseSignatures).SignatureList
     }
     catch {
-        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+        if ($_.Exception.Message -match '0xC0000100') {
             return @()
         }
         else {
@@ -382,12 +406,14 @@ function Get-UEFICert {
 
     $Subject = $SignatureList.SignatureData.Subject
 
-    if ($Verbose) {
-        $Certs = $Subject | where { $_ -match '\s' } | foreach { $null = $_ -match $CN_Regex; $Matches[2] }
+    if ($Verbose -or $Variable -match 'PK') {
+        $Filter_Regex = '.*'
     }
     else {
-        $Certs = $Subject | where { $_ -match 'Microsoft|Mosby' } | foreach { $null = $_ -match $CN_Regex; $Matches[2] }
+        $Filter_Regex = 'Microsoft|Mosby'
     }
+
+    $Certs = $Subject | where { $_ -match $Filter_Regex } | foreach { $null = $_ -match $CN_Regex; $Matches[2] }
 
     if ($Variable -match 'PK') {
         if ($SignatureList.SignatureData -eq $null -and $SignatureList.SignatureOwner.Guid -eq $VMWARE_GUID) {
@@ -406,7 +432,7 @@ function Check-TrustedPK {
         $PKSignatureList = (Get-SecureBootUEFI PK | Get-UefiDatabaseSignatures).SignatureList
     }
     catch {
-        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+        if ($_.Exception.Message -match '0xC0000100') {
             return $false
         }
         else {
@@ -444,7 +470,7 @@ function Get-SecureBootUEFI_DBXSVN {
         $SignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
     }
     catch {
-        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+        if ($_.Exception.Message -match '0xC0000100') {
             return $null
         }
         else {
@@ -465,10 +491,10 @@ function Get-SecureBootUEFI_DBXSVN {
 }
 
 function Get-WindowsUpdate_DBXSVN {
-    $DBXSVN_File = "$env:SystemRoot\System32\SecureBootUpdates\DBXUpdateSVN.bin"
+    $DBXUpdateSVN_File = "$env:SystemRoot\System32\SecureBootUpdates\DBXUpdateSVN.bin"
 
     try {
-        $Signatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXSVN_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
+        $Signatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdateSVN_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
     }
     catch {
         $_.Exception.Message
@@ -483,6 +509,108 @@ function Get-WindowsUpdate_DBXSVN {
     }
 
     return (Get-SignatureDataSVN $($SignatureData))
+}
+
+Add-Type -AssemblyName System.Security
+
+function Get-CIPolicyVersion {
+    <#
+        https://gist.github.com/HarmJ0y/c5cf17def719d3b6406a89504ec518c4
+
+        Author: Matthew Graeber (@mattifestation)
+        Contributors: James Forshaw (@tiraniddo)
+        Modified By: garlin (@garlin-cant-code)
+        License: BSD 3-Clause
+    #>
+
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [String]$BinaryFilePath
+    )
+
+    $GuidLength = 0x10
+
+    try {
+        $CIPolicyBytes = [IO.File]::ReadAllBytes($BinaryFilePath)
+
+        try {
+            $ContentType = $null
+
+            try {
+                $ContentType = [Security.Cryptography.Pkcs.ContentInfo]::GetContentType($CIPolicyBytes)
+            } catch { }
+
+            # Check for PKCS#7 ASN.1 SignedData type
+            if ($ContentType -and $ContentType.Value -eq '1.2.840.113549.1.7.2') {
+                $Cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
+                $Cms.Decode($CIPolicyBytes)
+                $CIPolicyBytes = $Cms.ContentInfo.Content
+                if ($CIPolicyBytes[0] -eq 4) {
+                    # Policy is stored as an OCTET STRING
+                    $PolicySize = $CIPolicyBytes[1]
+                    $BaseIndex = 2
+                    if (($PolicySize -band 0x80) -eq 0x80) {
+                        $SizeCount = $PolicySize -band 0x7F
+                        $BaseIndex += $SizeCount
+                        $PolicySize = 0
+                        for ($i = 0; $i -lt $SizeCount; $i++) {
+                            $PolicySize = $PolicySize -shl 8
+                            $PolicySize = $PolicySize -bor $CIPolicyBytes[2 + $i]
+                        }
+                    }
+
+                    $CIPolicyBytes = $CIPolicyBytes[$BaseIndex..($BaseIndex + $PolicySize - 1)]
+                }
+            }
+        } catch {
+            throw $_
+            return
+        }
+
+        $MemoryStream = New-Object -TypeName IO.MemoryStream -ArgumentList @(,$CIPolicyBytes)
+        $BinaryReader = New-Object -TypeName System.IO.BinaryReader -ArgumentList $MemoryStream, ([Text.Encoding]::Unicode)
+    } catch {
+        throw $_
+        return
+    }
+
+    try {
+        $CIPolicyFormatVersion = $BinaryReader.ReadInt32()
+        $PolicyTypeID = [Guid][Byte[]] $BinaryReader.ReadBytes($GuidLength)
+
+        [Byte[]] $PlatformIDBytes = $BinaryReader.ReadBytes($GuidLength)
+
+        $OptionFlags = $BinaryReader.ReadInt32()
+
+        # Validate that the high bit is set - i.e. mask it off with 0x80000000
+        if ($OptionFlags -band ([Int32]::MinValue) -ne [Int32]::MinValue) {
+            throw "Invalid policy options flag. The CI policy may be corrupt."
+            return
+        }
+
+        $EKURuleEntryCount = $BinaryReader.ReadInt32()
+        $FileRuleEntryCount = $BinaryReader.ReadInt32()
+        $SignerRuleEntryCount = $BinaryReader.ReadInt32()
+        $SignerScenarioEntryCount = $BinaryReader.ReadInt32()
+
+        $Revision = $BinaryReader.ReadUInt16()
+        $Build = $BinaryReader.ReadUInt16()
+        $Minor = $BinaryReader.ReadUInt16()
+        $Major = $BinaryReader.ReadUInt16()
+
+        $PolicyVersion = New-Object -TypeName Version -ArgumentList $Major, $Minor, $Build, $Revision
+        return $PolicyVersion
+    } catch {
+        $BinaryReader.Close()
+        $MemoryStream.Close()
+
+        throw $_
+        return
+    }
+
+    $BinaryReader.Close()
+    $MemoryStream.Close()
 }
 
 function Audit-UEFI {
@@ -545,14 +673,16 @@ function Audit-UEFI {
             $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
             $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
 
-            if ($EFI_SkuSiPolicy_File_Hash -ne $SkuSiPolicy_File_Hash) {
-                $CheckList += "{0,-3} SkuSiPolicy.p7b (for VBS) is not updated`n" -f ('{0}.' -f $index++)
+            $SkuSiPolicy_File_Version = Get-CIPolicyVersion $SkuSiPolicy_File
+            $EFI_SkuSiPolicy_File_Version = Get-CIPolicyVersion $EFI_SkuSiPolicy_File
+
+            if (($EFI_SkuSiPolicy_File_Hash -ne $SkuSiPolicy_File_Hash) -and ([Version]$SkuSiPolicy_File_Version -gt [Version]$EFI_SkuSiPolicy_File_Version)) {
+                $CheckList += "{0,-3} SkuSiPolicy.p7b is not updated`n" -f ('{0}.' -f $index++)
                 $script:UpdateSkuSiPolicy = $true
             }
         }
         else {
-            $CheckList += "{0,-3} SkuSiPolicy.p7b (for VBS) is missing`n" -f ('{0}.' -f $index++)
-            $script:UpdateSkuSiPolicy = $true
+            $CheckList += "{0,-3} SkuSiPolicy.p7b (for VBS) is missing [OPTIONAL]`n" -f ('{0}.' -f $index)
         }
     }
 
@@ -585,7 +715,7 @@ function Download-EDK2bin {
     }
 }
 
-function Suspend-Bitlocker {
+function Suspend-Protection {
     $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
 
     if ($ProtectionStatus -eq 'On') {
@@ -601,7 +731,7 @@ function Suspend-Bitlocker {
         }
 
         try {
-            $null = Suspend-Bitlocker -MountPoint $SystemDrive -RebootCount $RebootCount
+            $null = Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $RebootCount
         }
         catch {
             $_.Exception.Message
@@ -613,7 +743,7 @@ function Suspend-Bitlocker {
 function Set-SecureBootSignedFile {
     param (
         [Parameter(Mandatory)]
-        [ValidateSet('PKDefault','KEKDefault','dbDefault','dbxDefault','PK','KEK','db','dbx')]
+        [ValidateSet('PK','KEK','db','dbx')]
         [string]$Variable,
 
         [Parameter(Mandatory)]
@@ -633,7 +763,7 @@ function Set-SecureBootSignedFile {
         $ErrorMessage = 'ERROR: Failed to write "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable.ToUpper()
         Write-Host $ErrorMessage -Foreground Red
 
-        if ($_.Exception.Message -match 'Incorrect authentication') {
+        if ($_.Exception.Message -match '0xC0000022') {
             Write-Host 'Wrong signature for this UEFI variable.' -Foreground Red
         }
         else {
@@ -646,7 +776,7 @@ function Set-SecureBootSignedFile {
     'Successfully wrote "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable
     $script:UEFI_Updated = $true
 
-    Suspend-Bitlocker
+    Suspend-Protection
 }
 
 function Append-SecureBootSignedFile {
@@ -671,7 +801,7 @@ function Append-SecureBootSignedFile {
 
     param (
         [Parameter(Mandatory)]
-        [ValidateSet('PKDefault','KEKDefault','dbDefault','dbxDefault','PK','KEK','db','dbx')]
+        [ValidateSet('PK','KEK','db','dbx')]
         [string]$Variable,
 
         [Parameter(Mandatory)]
@@ -733,11 +863,25 @@ function Append-SecureBootSignedFile {
         $ErrorMessage = 'ERROR: Failed to append "{0}.bin" to UEFI {1}.' -f $CertName, $Variable.ToUpper()
         Write-Host $ErrorMessage -Foreground Red
 
-        if ($_.Exception.Message -match 'Incorrect authentication') {
-            Write-Host 'Wrong signature for this UEFI variable.' -Foreground Red
-        }
-        else {
-            $_.Exception.Message
+        switch -Regex ($_.Exception.Message) {
+            # Incorrect authentication data: 0xC0000022
+            '0xC0000022' {
+                Write-Host 'Wrong signature for this UEFI variable.' -Foreground Red
+            }
+
+            # Unexpected Result, status error: 0xC000000D
+            '0xC000000D' {
+                if ($Variable -eq 'KEK') {
+                    Write-Host "UEFI doesn't allow appending to KEK variable.  Please try Setup Mode." -Foreground Red
+                }
+                else {
+                    Write-Host $_.Exception.Message -Foreground Red
+                }
+            }
+
+            default {
+                $_.Exception.Message
+            }
         }
 
         exit 1
@@ -746,7 +890,7 @@ function Append-SecureBootSignedFile {
     'Successfully appended "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable.ToUpper()
     $script:UEFI_Updated = $true
 
-    Suspend-Bitlocker
+    Suspend-Protection
     Remove-Item $SigFile,$ContentFile -Force
 }
 
@@ -756,9 +900,10 @@ function Match-DBXSignatureData {
         Parses EFI signatures from a DBX Update .bin file and compares the entire list against the current UEFI DBX.
 
         .DESCRIPTION
-        From https://gist.github.com/out0xb2/f8e0bae94214889a89ac67fceb37f8c0#file-check-dbx-ps1
-        Modified by github.com/cjee21
-        Modified by github.com/garlin-cant-code
+        https://gist.github.com/out0xb2/f8e0bae94214889a89ac67fceb37f8c0#file-check-dbx-ps1
+
+        Modified By: github.com/cjee21
+        Modified By: garlin (@garlin-cant-code)
 
         .PARAMETER DBXUpdateFile
         Specifies a filename containing signed DBX Update signatures
@@ -790,7 +935,7 @@ function Match-DBXSignatureData {
         $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
     }
     catch {
-        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+        if ($_.Exception.Message -match '0xC0000100') {
             return $false
         }
         else {
@@ -894,8 +1039,8 @@ function Update-KEK_Cert {
         $PK_Thumbprint = (Get-UefiDatabaseSignatures -BytesIn (Get-SecureBootUEFI PK).Bytes).SignatureList.SignatureData.Thumbprint
     }
     catch {
-        if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
-            return $null
+        if ($_.Exception.Message -match '0xC0000100') {
+            $PK_Thumbprint = $null
         }
         else {
             throw $_.Exception.Message
@@ -975,22 +1120,83 @@ function Print-Header {
     return ("{0}`n{1}" -f $Header, ($Header -replace "`n" -replace '(.)',$Separator))
 }
 
+function Update-EFI_BootManager {
+    'Copying EFI boot files.'
+    $EFI_DriveLetter = (& mountvol) -split "`n" | foreach { if ($_ -match '(.*mounted at )(.*)(\\)') { $Matches[2] } }
+
+    if ($EFI_DriveLetter -eq $null) {
+        $EFI_DriveLetter = ((68..89 | foreach { [char]$_ + ':' }) | where { (Get-WmiObject Win32_LogicalDisk).DeviceID -notcontains $_ }) | select -First 1
+
+        if ($EFI_DriveLetter -eq $null) {
+            'ERROR: Unable to assign drive letter for EFI partition.'
+            exit 1
+        }
+
+        try {
+            Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
+            Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+            Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
+        }
+    }
+    else {
+        try {
+            Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
+        }
+    }
+
+    $RE_info = reagentc /info
+
+    if (($RE_info -match 'RE status:' -split ' ')[-1] -eq 'Enabled') {
+        $WinRE = $true
+
+        $WinRE_Path = ($RE_info -match 'RE location:' -split ' ')[-1]
+        $WinRE_GUID = ($RE_info -match 'identifier:' -split ' ')[-1]
+    }
+
+    if ($WinRE) {
+        try {
+            Start-Process 'reagentc' -ArgumentList "/setreimage /path $WinRE_Path" -NoNewWindow -Wait
+            Start-Process 'bcdedit' -ArgumentList "/set {default} recoverysequence {$WinRE_GUID}" -NoNewWindow -Wait
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
+        }
+
+        $null = New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name Enable_WinRE -Value 'conhost --headless C:\Windows\System32\reagentc.exe /enable' -Force
+    }
+}
+
 $ScriptBlock = {
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
-
     $SystemDrive = (Get-WmiObject Win32_OperatingSystem).SystemDrive
-
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $ProgressPreference = 'SilentlyContinue'
-
     $Result = Confirm-MinimumUBR
 
     if ($Result -ne $true) {
-        "ERROR: $Result.`n"
-        exit 1
+        if ($Result -notmatch 'Cannot confirm') {
+            "ERROR: $Result.`n"
+            exit 1
+        }
+        else {
+            "WARNING: $Result.`n"
+        }
     }
 
-    $SecureBoot = Confirm-SecureBootUEFI
+    try {
+        $SecureBoot = Confirm-SecureBootUEFI
+    }
+    catch {
+        "ERROR: Cannot read Secure Boot status.`n"
+        exit 1
+    }
 
     if ($SecureBoot -isnot [bool]) {
         "ERROR: This PC doesn't support Secure Boot.`n"
@@ -1008,7 +1214,7 @@ $ScriptBlock = {
             $Count = (Get-SecureBootUEFI $Variable).Bytes.Count
         }
         catch {
-            if ($_.Exception.Message -eq 'Variable is currently undefined: 0xC0000100') {
+            if ($_.Exception.Message -match '0xC0000100') {
                 $Count = 0
             }
         }
@@ -1016,7 +1222,19 @@ $ScriptBlock = {
         New-Variable -Name "${Variable}_BytesCount" -Value $Count
     }
 
-    if (((Get-SecureBootUEFI SetupMode).Bytes -Join '') -eq 1) {
+    try {
+        $SetupMode_Bytes = Get-SecureBootUEFI SetupMode
+    }
+    catch {
+        if ($_.Exception.Message -match '0xC0000100') {
+            $SetupMode_Bytes = @{}
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
+
+    if (($SetupMode_Bytes -join '') -eq 1) {
         $SetupMode = $true
     }
 
@@ -1032,6 +1250,11 @@ $ScriptBlock = {
     }
 
     $PK_Trusted = Check-TrustedPK
+
+    if ($PK_Cert -eq 'Microsoft Corporation KEK 2K CA 2023') {
+        'ERROR: KEK CA 2023 is not a valid Platform Key'
+        exit 1
+    }
 
     $SystemDisk = (Get-Disk | Where-Object {$_.IsSystem -eq $true}).Number
     $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
@@ -1115,7 +1338,7 @@ $ScriptBlock = {
     }
 
     if ($Revoke) {
-        if ($SecureBoot -and $KEK_Certs -notcontains 'Microsoft Corporation KEK 2K CA 2023') {
+        if ($SecureBoot -and ('Microsoft Corporation KEK 2K CA 2023' -notin (Get-UEFICert KEK))) {
             'WARNING: Disable Secure Boot, before attempting to use -Revoke option.  No [KEK 2K CA 2023] cert is currently enrolled.'
             '{0}System will fail to boot due to a security violation.' -f $Tab4
             exit 1
@@ -1139,7 +1362,17 @@ $ScriptBlock = {
             $DBXUpdateSVN_bin = "$UpdatesFolder\DBXUpdateSVN.bin"
         }
 
-        $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+        try {
+            $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+        }
+        catch {
+            if ($_.Exception.Message -match '0xC0000100') {
+                $DBXSignatureData = $false
+            }
+            else {
+                throw $_.Exception.Message
+            }
+        }
 
         if (-not $(Match-DBXSignatureData $DBXUpdate_bin)) {
             Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
@@ -1166,32 +1399,44 @@ $ScriptBlock = {
         }
     }
 
-    if (($Revoke -and $VBS_Enabled) -or $SkuSiPolicy) {
+    $AvailableUpdates = 0
+
+    if ($SkuSiPolicy) {
+        $SkuSiPolicy_File_Version = Get-CIPolicyVersion $SkuSiPolicy_File
+
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
             $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
             $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
 
-            if ($EFI_SkuSiPolicy_File_Hash -ne $SkuSiPolicy_File_Hash) {
-                Copy-Item $SkuSiPolicy_File "$EFI_SkuSiPolicy_File" -Force
+            $EFI_SkuSiPolicy_File_Version = Get-CIPolicyVersion $EFI_SkuSiPolicy_File
 
-                'Deployed SkuSiPolicy.p7b (for VBS).'
+            if (($EFI_SkuSiPolicy_File_Hash -ne $SkuSiPolicy_File_Hash) -and ([Version]$SkuSiPolicy_File_Version -gt [Version]$EFI_SkuSiPolicy_File_Version)) {
+                Copy-Item $SkuSiPolicy_File "$EFI_SkuSiPolicy_File" -Force
+                $AvailableUpdates = $AvailableUpdates -bor 0x10
+
+                'Deployed SkuSiPolicy.p7b, Version: {0}' -f [string]$SkuSiPolicy_File_Version
                 $UEFI_Updated = $true
             }
         }
         else {
             Copy-Item $SkuSiPolicy_File "$EFI_SkuSiPolicy_File" -Force
+            $AvailableUpdates = $AvailableUpdates -bor 0x10
 
-            'Deployed SkuSiPolicy.p7b (for VBS).'
+            'Deployed SkuSiPolicy.p7b, Version: {0}' -f [string]$SkuSiPolicy_File_Version
             $UEFI_Updated = $true
         }
     }
 
     if ($Revoke -and $SBAT) {
-        $null = Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -Value 0x400
-        Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+        $AvailableUpdates = $AvailableUpdates -bor 0x400
 
         'Applying SBAT update for Linux.'
         $UEFI_Updated = $true
+    }
+
+    if ($AvailableUpdates -gt 0) {
+        $null = Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -Value $AvailableUpdates
+        Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
     }
 
     if ($Latest) {
@@ -1205,60 +1450,7 @@ $ScriptBlock = {
         $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
         if ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash) {
-            'Copying EFI boot files.'
-
-            $RE_info = reagentc /info
-
-            if (($RE_info -match 'RE status:' -split ' ')[-1] -eq 'Enabled') {
-                $WinRE = $true
-
-                $WinRE_Path = ($RE_info -match 'RE location:' -split ' ')[-1]
-                $WinRE_GUID = ($RE_info -match 'identifier:' -split ' ')[-1]
-            }
-
-            $EFI_DriveLetter = (& mountvol) -split "`n" | foreach { if ($_ -match '(.*mounted at )(.*)(\\)') { $Matches[2] } }
-
-            if ($EFI_DriveLetter -eq $null) {
-                $EFI_DriveLetter = ((68..89 | foreach { [char]$_ + ':' }) | where { (Get-WmiObject Win32_LogicalDisk).DeviceID -notcontains $_ }) | select -First 1
-
-                if ($EFI_DriveLetter -eq $null) {
-                    'ERROR: Unable to assign drive letter for EFI partition.'
-                    exit 1
-                }
-
-                try {
-                    Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
-                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
-                    Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
-                }
-                catch {
-                    $_.Exception.Message
-                    exit 1
-                }
-            }
-            else {
-                try {
-                    Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
-                }
-                catch {
-                    $_.Exception.Message
-                    exit 1
-                }
-            }
-
-            if ($WinRE) {
-                try {
-                    Start-Process 'reagentc' -ArgumentList "/setreimage /path $WinRE_Path" -NoNewWindow -Wait
-                    Start-Process 'bcdedit' -ArgumentList "/set {default} recoverysequence {$WinRE_GUID}" -NoNewWindow -Wait
-                }
-                catch {
-                    $_.Exception.Message
-                    exit 1
-                }
-
-                $null = New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name Enable_WinRE -Value 'conhost --headless C:\Windows\System32\reagentc.exe /enable' -Force
-            }
-
+            Update-EFI_BootManager
             $UEFI_Updated = $true
         }
 
@@ -1271,36 +1463,55 @@ $ScriptBlock = {
             else {
                 foreach ($Volume in $RemovableDrives) {
                     $DriveLetter = $Volume.DriveLetter
-                    $EFI_BootFile = "${DriveLetter}:\EFI\boot\boot${EDK2_Arch}.efi"
+                    $EFI_BootMgr = "${DriveLetter}:\EFI\Microsoft\Boot\bootmgfw.efi"
+                    $EFI_BootFile = "${DriveLetter}:\EFI\Boot\boot${EDK2_Arch}.efi"
 
-                    if (-not (Test-Path $EFI_BootFile)) {
+                    if (-not (Test-Path $EFI_BootMgr) -and -not (Test-Path $EFI_BootFile)) {
                         continue
                     }
 
-                    $EFI_BootFile_Hash = (Get-FileHash -LiteralPath $EFI_BootFile).Hash
+                    if (Test-Path $EFI_BootMgr) {
+                        $EFI_BootMgr_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr).Hash
 
-                    if ($EFI_BootFile_Hash -ne $BootMgrEX_File_Hash) {
-                        $Label = (Get-Volume -DriveLetter $DriveLetter).FileSystemLabel
+                        if ($EFI_BootMgr_Hash -ne $BootMgrEX_File_Hash) {
+                            $BCD = "${DriveLetter}:\EFI\Microsoft\Boot\BCD"
+                            $Backup_BCD = "$env:TEMP\BCD.BAK"
 
-                        if ($Label -ne '') {
-                            '{0}Copying EFI boot files to USB Drive {1}: "{2}"' -f $Tab4, $DriveLetter, $Label
+                            try {
+                                Copy-Item $BCD $Backup_BCD -Force
+                                Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+                                Copy-Item $Backup_BCD $BCD -Force
+                                Remove-Item $Backup_BCD -Force
+                            }
+                            catch {
+                                $_.Exception.Message
+                                exit 1
+                            }
                         }
-                        else {
-                            '{0}Copying EFI boot files to USB Drive {1}:' -f $Tab4, $DriveLetter
+                    }
+                    else {
+                        $EFI_BootFile_Hash = (Get-FileHash -LiteralPath $EFI_BootFile).Hash
+
+                        if ($EFI_BootFile_Hash -ne $BootMgrEX_File_Hash) {
+                            $Label = (Get-Volume -DriveLetter $DriveLetter).FileSystemLabel
+
+                            if ($Label -ne '') {
+                                '{0}Copying EFI boot file to USB Drive {1}: "{2}"' -f $Tab4, $DriveLetter, $Label
+                            }
+                            else {
+                                '{0}Copying EFI boot file to USB Drive {1}:' -f $Tab4, $DriveLetter
+                            }
+
+                            try {
+                                Copy-Item $BootMgrEX_File $EFI_BootFile -Force
+                            }
+                            catch {
+                                $_.Exception.Message
+                                exit 1
+                            }
+
+                            $Media_Updated = $true
                         }
-
-                         try {
-                             Copy-Item "${DriveLetter}:\EFI\Microsoft\Boot\BCD" $env:TEMP -Force
-                             Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /f UEFI /s $DriveLetter /bootex" -NoNewWindow -Wait
-                             Copy-Item "$env:TEMP\BCD" "${DriveLetter}:\EFI\Microsoft\Boot\BCD" -Force
-                             Remove-Item "$env:TEMP\BCD" -Force
-                         }
-                         catch {
-                             $_.Exception.Message
-                             exit 1
-                         }
-
-                        $Media_Updated = $true
                     }
                 }
 
