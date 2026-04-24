@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.04.08
+.VERSION 2026.04.24
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.04.08'
+$ScriptVersion = '2026.04.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -125,11 +125,10 @@ function Get-UefiDatabaseSignatures {
     <#
         .SYNOPSIS
         Parses UEFI Signature Databases into logical Powershell objects
+        # https://github.com/cjee21/Check-UEFISecureBootVariables
 
         .DESCRIPTION
-        https://github.com/cjee21/Check-UEFISecureBootVariables
-
-        Author: Matthew Graeber (@mattifestation)
+        Original Author: Matthew Graeber (@mattifestation)
         Modified By: Jeremiah Cox (@int0x6)
         Modified By: Joel Roth (@nafai)
         Modified By: garlin (@garlin-cant-code)
@@ -203,7 +202,7 @@ function Get-UefiDatabaseSignatures {
             $Bytes = Get-Content -AsByteStream $Filename -ErrorAction Stop
         }
         else {
-            $Bytes = Get-Content -Encoding Byte $Filename  -ErrorAction Stop
+            $Bytes = Get-Content -Encoding Byte $Filename -ErrorAction Stop
         }
     }
     elseif ($Variable)
@@ -222,12 +221,25 @@ function Get-UefiDatabaseSignatures {
 
         # Signature is known to be ASN size plus header of 4 bytes
         $sig_length = $Bytes[42] * 256 + $Bytes[43] + 4
+
         if ($sig_length -gt ($Bytes.Length + 40)) {
             Write-Error "Signature longer than file size!" -ErrorAction Stop
         }
 
+        # Skip past Microsoft's "dbx" serialized header
+        # https://github.com/microsoft/secureboot_objects/issues/400#issuecomment-4298521163
+
+        $dbx_Bytes = [Byte[]]@(0x64, 0x00, 0x62, 0x00, 0x78, 0x00)
+
+        if ([System.Linq.Enumerable]::SequenceEqual([Byte[]]@($Bytes[($sig_length + 40)..($sig_length + 45)]), $dbx_Bytes)) {
+            $offset = 42
+        }
+        else {
+            $offset = 0
+        }
+
         ## Unsigned db store
-        [System.Byte[]]$Bytes = @($Bytes[($sig_length+40)..($Bytes.Length - 1)].Clone())
+        [System.Byte[]]$Bytes = @($Bytes[($sig_length + 40 + $offset)..($Bytes.Length - 1)].Clone())
     }
     else
     {
@@ -448,7 +460,7 @@ function Get-SignatureDataSVN {
     )
 
     # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
-    $SVN = '{0}.{1}' -f [int]::Parse($SignatureData.Substring(36,4), [System.Globalization.NumberStyles]::HexNumber), [int]::Parse($SignatureData.Substring(40,4), [System.Globalization.NumberStyles]::HexNumber)
+    $SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
 
     return $SVN
 }
@@ -685,20 +697,26 @@ function Confirm-MinimumUBR {
 
     switch ($Build) {
         14393 {
-            if ($UBR -lt 8519) {
-                return "Update W10 $Release to KB5066836 (Oct 2025) or later"
+            if ($UBR -lt 9060) {
+                return "Update Windows $Release to KB5082198 (Apr 2026) or later"
             }
         }
 
         17763 {
-            if ($UBR -lt 7919 ) {
-                return "Update W10 $Release to KB5066586 (Oct 2025) or later"
+            if ($UBR -lt 8644) {
+                return "Update Windows $Release to KB5082123 (Apr 2026) or later"
             }
         }
 
         { $_ -in 19044,19045 } {
-            if ($UBR -lt 6456) {
-                return "Update W10 $Release to KB5066791 (Oct 2025) or later"
+            if ($UBR -lt 7184) {
+                return "Update W10 $Release to KB5082200 (Apr 2026) or later"
+            }
+        }
+
+        20348 {
+            if ($UBR -lt 5020) {
+                return "Update Server 2022 to KB5082142 (Apr 2026) or later"
             }
         }
 
@@ -709,19 +727,27 @@ function Confirm-MinimumUBR {
         }
 
         { $_ -in 22621,22631 } {
-            if ($UBR -lt 6060) {
-                return "Update W11 $Release to KB5066793 (Oct 2025) or later"
+            if ($UBR -lt 6936) {
+                return "Update W11 $Release to KB5082052 (Apr 2026) or later"
+            }
+        }
+
+        25398 {
+            if ($UBR -lt 2274) {
+                return "Update Server 23H2 to KB5082060 (Apr 2026) or later"
             }
         }
 
         { $_ -in 26100,26200 } {
-            if ($UBR -lt 6899) {
-                return "Update W11 $Release to KB5066835 (Oct 2025) or later"
+            if ($UBR -lt 8246) {
+                return "Update W11 $Release to KB5083769 (Apr 2026) or later"
             }
         }
 
         28000 {
-            return $true
+            if ($UBR -lt 1836) {
+                return "Update W11 26H1 to KB5083768 (Apr 2026) or later"
+            }
         }
 
         { $_ -gt 26200 } {
@@ -736,106 +762,23 @@ function Confirm-MinimumUBR {
     return $true
 }
 
-Add-Type -AssemblyName System.Security
-
-function Get-CIPolicyVersion {
-    <#
-        https://gist.github.com/HarmJ0y/c5cf17def719d3b6406a89504ec518c4
-
-        Author: Matthew Graeber (@mattifestation)
-        Contributors: James Forshaw (@tiraniddo)
-        Modified By: garlin (@garlin-cant-code)
-        License: BSD 3-Clause
-    #>
-
+function Get-SkuSiPolicyVersion {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory)]
         [String]$BinaryFilePath
     )
 
-    $GuidLength = 0x10
+    $Bytes = [IO.File]::ReadAllBytes($BinaryFilePath)
 
-    try {
-        $CIPolicyBytes = [IO.File]::ReadAllBytes($BinaryFilePath)
-
-        try {
-            $ContentType = $null
-
-            try {
-                $ContentType = [Security.Cryptography.Pkcs.ContentInfo]::GetContentType($CIPolicyBytes)
-            } catch { }
-
-            # Check for PKCS#7 ASN.1 SignedData type
-            if ($ContentType -and $ContentType.Value -eq '1.2.840.113549.1.7.2') {
-                $Cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
-                $Cms.Decode($CIPolicyBytes)
-                $CIPolicyBytes = $Cms.ContentInfo.Content
-                if ($CIPolicyBytes[0] -eq 4) {
-                    # Policy is stored as an OCTET STRING
-                    $PolicySize = $CIPolicyBytes[1]
-                    $BaseIndex = 2
-                    if (($PolicySize -band 0x80) -eq 0x80) {
-                        $SizeCount = $PolicySize -band 0x7F
-                        $BaseIndex += $SizeCount
-                        $PolicySize = 0
-                        for ($i = 0; $i -lt $SizeCount; $i++) {
-                            $PolicySize = $PolicySize -shl 8
-                            $PolicySize = $PolicySize -bor $CIPolicyBytes[2 + $i]
-                        }
-                    }
-
-                    $CIPolicyBytes = $CIPolicyBytes[$BaseIndex..($BaseIndex + $PolicySize - 1)]
-                }
-            }
-        } catch {
-            throw $_
-            return
-        }
-
-        $MemoryStream = New-Object -TypeName IO.MemoryStream -ArgumentList @(,$CIPolicyBytes)
-        $BinaryReader = New-Object -TypeName System.IO.BinaryReader -ArgumentList $MemoryStream, ([Text.Encoding]::Unicode)
-    } catch {
-        throw $_
-        return
+    if ([System.Text.Encoding]::ASCII.GetString($bytes) -replace "`0" -match '\d+(\.\d+)+') {
+        $Version = $Matches[0]
+    }
+    else {
+        $Version = $null
     }
 
-    try {
-        $CIPolicyFormatVersion = $BinaryReader.ReadInt32()
-        $PolicyTypeID = [Guid][Byte[]] $BinaryReader.ReadBytes($GuidLength)
-
-        [Byte[]] $PlatformIDBytes = $BinaryReader.ReadBytes($GuidLength)
-
-        $OptionFlags = $BinaryReader.ReadInt32()
-
-        # Validate that the high bit is set - i.e. mask it off with 0x80000000
-        if ($OptionFlags -band ([Int32]::MinValue) -ne [Int32]::MinValue) {
-            throw "Invalid policy options flag. The CI policy may be corrupt."
-            return
-        }
-
-        $EKURuleEntryCount = $BinaryReader.ReadInt32()
-        $FileRuleEntryCount = $BinaryReader.ReadInt32()
-        $SignerRuleEntryCount = $BinaryReader.ReadInt32()
-        $SignerScenarioEntryCount = $BinaryReader.ReadInt32()
-
-        $Revision = $BinaryReader.ReadUInt16()
-        $Build = $BinaryReader.ReadUInt16()
-        $Minor = $BinaryReader.ReadUInt16()
-        $Major = $BinaryReader.ReadUInt16()
-
-        $PolicyVersion = New-Object -TypeName Version -ArgumentList $Major, $Minor, $Build, $Revision
-        return $PolicyVersion
-    } catch {
-        $BinaryReader.Close()
-        $MemoryStream.Close()
-
-        throw $_
-        return
-    }
-
-    $BinaryReader.Close()
-    $MemoryStream.Close()
+    return $Version
 }
 
 function Audit-UEFI {
@@ -856,6 +799,10 @@ function Audit-UEFI {
 
     if ($SetupMode) {
         $CheckList += "{0,-3} UEFI is in Setup Mode`n" -f ('{0}.' -f $index++)
+
+        if ($WindowsHello) {
+            $CheckList += "{0,-3} Windows Hello must be disabled when in UEFI Setup Mode`n" -f ('{0}.' -f $index++)
+        }
     }
 
     if ($PK_Cert.Count -and -not $PK_Trusted) {
@@ -915,19 +862,19 @@ function Audit-UEFI {
 
     if ($VBS_Enabled) {
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
-            $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
-            $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
+            $SkuSiPolicyFile_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
+            $EFI_SkuSiPolicyFile_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
 
-            $SkuSiPolicy_File_Version = Get-CIPolicyVersion $SkuSiPolicy_File
-            $EFI_SkuSiPolicy_File_Version = Get-CIPolicyVersion $EFI_SkuSiPolicy_File
+            $SkuSiPolicyFile_Version = Get-SkuSiPolicyVersion $SkuSiPolicy_File
+            $EFI_SkuSiPolicyFile_Version = Get-SkuSiPolicyVersion $EFI_SkuSiPolicy_File
 
-            if (($EFI_SkuSiPolicy_File_Hash -ne $SkuSiPolicy_File_Hash) -and ([Version]$SkuSiPolicy_File_Version -gt [Version]$EFI_SkuSiPolicy_File_Version)) {
+            if (($EFI_SkuSiPolicyFile_Hash -ne $SkuSiPolicyFile_Hash) -and ([Version]$SkuSiPolicyFile_Version -gt [Version]$EFI_SkuSiPolicyFile_Version)) {
                 $CheckList += "{0,-3} SkuSiPolicy.p7b is not updated`n" -f ('{0}.' -f $index++)
                 $script:UpdateSkuSiPolicy = $true
             }
         }
         else {
-            $CheckList += "{0,-3} SkuSiPolicy.p7b (for VBS) is missing [OPTIONAL]`n" -f ('{0}.' -f $index++)
+            $CheckList += "{0}[OPTIONAL] SkuSiPolicy.p7b (for VBS) is missing from EFI`n" -f $(if ($index) { "`n" })
         }
     }
 
@@ -1018,6 +965,52 @@ function Get-ProductVersion {
     return $ProductVersion
 }
 
+function Validate-BootMgr_File
+{
+    param (
+        [Parameter(Mandatory)]
+        [string]$BootMgr_File,
+
+        [Parameter(Mandatory)]
+        [string]$Label,
+
+        [Parameter(Mandatory)]
+        [string]$Indent
+    )
+
+    $PFXCert = Get-PFXCert $BootMgr_File
+
+    if ((Validate-PFXCert $PFXCert) -eq 'BANNED') {
+        '{0}Boot File [{1}] {2} BANNED' -f $Indent, ($PFXCert -replace 'Microsoft Windows '), $Verb
+    }
+    else {
+        $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
+        $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
+
+        if ($UEFI_DBXSVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+            '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+        }
+        else {
+            '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+        }
+    }
+
+    if ($Verbose) {
+        $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
+        $Indent += $Tab4
+
+        if ($BootMgrSVN -ne $null) {
+            "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File), $BootMgrSVN
+        }
+        else {
+            "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File)
+        }
+    }
+    else {
+        Write-Output ''
+    }
+}
+
 function Check-BootMedia {
     $RemovableDrives = Get-Volume | where { $_.DriveType -in 'CD-ROM','Removable' -and $_.DriveLetter -ne $null } | sort DriveLetter
 
@@ -1051,62 +1044,10 @@ function Check-BootMedia {
         }
 
         if (Test-Path $EFI_BootMgr) {
-            $PFXCert = Get-PFXCert $EFI_BootMgr
-
-            if ((Validate-PFXCert $PFXCert) -eq 'BANNED') {
-                '{0}Boot File [{1}] {2} BANNED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
-            }
-            else {
-                $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
-                $EFI_BootMgr_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr).Hash
-
-                if ($UEFI_DBXSVN -and ($EFI_BootMgr_Hash -ne $BootMgrEX_File_Hash)) {
-                    '{0}Boot File [{1}] {2} BANNED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
-                }
-                else {
-                    '{0}Boot File [{1}] {2} ALLOWED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
-                }
-            }
-
-            if ($Verbose) {
-                $EFI_BootMgrSVN = Get-BootManagerSVN $EFI_BootMgr
-
-                if ($EFI_BootMgrSVN -ne $null) {
-                    "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Tab12, $EFI_BootMgr, $Tab12, (Get-ProductVersion $EFI_BootMgr), $EFI_BootMgrSVN
-                }
-                else {
-                    "{0}{1}`n{2}File Version: {3}`n" -f $Tab12, $EFI_BootMgr, $Tab12, (Get-ProductVersion $EFI_BootMgr)
-                }
-            }
+            Validate-BootMgr_File -BootMgr_File $EFI_BootMgr -Label 'Boot File' -Indent $Tab8
         }
         elseif (Test-Path $EFI_BootFile) {
-            $PFXCert = Get-PFXCert $EFI_BootFile
-
-            if ((Validate-PFXCert $PFXCert) -eq 'BANNED') {
-                '{0}Boot File [{1}] {2} BANNED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
-            }
-            else {
-                $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
-                $EFI_BootFile_Hash = (Get-FileHash -LiteralPath $EFI_BootFile).Hash
-
-                if ($UEFI_DBXSVN -and ($EFI_BootFile_Hash -ne $BootMgrEX_File_Hash)) {
-                    '{0}Boot File [{1}] {2} BANNED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
-                }
-                else {
-                    '{0}Boot File [{1}] {2} ALLOWED.' -f $Tab8, ($PFXCert -replace 'Microsoft Windows '), $Verb
-                }
-            }
-
-            if ($Verbose) {
-                $EFI_BootFileSVN = Get-BootManagerSVN $EFI_BootFile
-
-                if ($EFI_BootFileSVN -ne $null) {
-                    "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Tab12, $EFI_BootFile, $Tab12, (Get-ProductVersion $EFI_BootFile), $EFI_BootFileSVN
-                }
-                else {
-                    "{0}{1}`n{2}File Version: {3}`n" -f $Tab12, $EFI_BootFile, $Tab12, (Get-ProductVersion $EFI_BootFile)
-                }
-            }
+            Validate-BootMgr_File -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab8
         }
 
         if (Test-Path $Boot_WIM) {
@@ -1174,7 +1115,7 @@ $ScriptBlock = {
     $BIOS = Get-CimInstance -ClassName Win32_BIOS
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
 
-    $SystemDrive = (Get-WmiObject Win32_OperatingSystem).SystemDrive
+    $SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
 
     # Force a refresh of reg key 'WindowsUEFICA2023Capable'
     Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
@@ -1243,6 +1184,13 @@ $ScriptBlock = {
     }
     catch {
         $_.Exception.Message
+    }
+
+    $NGC_Credential_Provider = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{D6886603-9D2F-4EB2-B667-1971041FA96B}'
+    $LogonCreds_Count = ((Get-ChildItem -Path $NGC_Credential_Provider) | where { (Get-ItemProperty $_.PSPath).LogonCredsAvailable -eq 1 }).Count
+
+    if ($LogonCreds_Count -gt 0) {
+        $WindowsHello = $true
     }
 
     $Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
@@ -1428,7 +1376,20 @@ $ScriptBlock = {
         }
     }
 
-    $SystemDisk = (Get-Disk | Where-Object {$_.IsSystem -eq $true}).Number
+    if ($Verbose) {
+        $SBATLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction SilentlyContinue)
+
+        if ($SBATLevel_Bytes.Count) {
+            $SbatLevel = [System.Text.Encoding]::ASCII.GetString($SBATLevel_Bytes) -replace ' ' -replace "`0"
+
+            if ($SbatLevel -ne '' -and $SbatLevel -notmatch '!SBATnotfound') {
+                Print-Header 'UEFI Variable'
+                '{0}SBAT (Linux only): {1}' -f $Tab4, ($SbatLevel -replace "`n",' / ')
+            }
+        }
+    }
+
+    $SystemDisk = (Get-CimInstance -Namespace 'Root\CIMv2' -Query 'SELECT * FROM Win32_DiskPartition' | where { $_.Type -eq 'GPT: System' }).DiskIndex
     $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
 
     $EFI_Path = '{0}EFI' -f (Get-Volume_DevicePath $GUID)
@@ -1442,37 +1403,12 @@ $ScriptBlock = {
     $PFXCert = Get-PFXCert $BootMgr_File
 
     Print-Header 'EFI Files'
-
-    if ((Validate-PFXCert $PFXCert) -eq 'BANNED') {
-        '{0}Windows Boot Manager [{1}] {2} BANNED.' -f $Tab4, ($PFXCert -replace 'Microsoft Windows '), $Verb
-    }
-    else {
-        $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
-        $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
-
-        if ($UEFI_DBXSVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
-            '{0}Windows Boot Manager [{1}] {2} BANNED.' -f $Tab4, ($PFXCert -replace 'Microsoft Windows '), $Verb
-        }
-        else {
-            '{0}Windows Boot Manager [{1}] {2} ALLOWED.' -f $Tab4, ($PFXCert -replace 'Microsoft Windows '), $Verb
-        }
-    }
-
-    if ($Verbose) {
-        $BootMgr_FileSVN = Get-BootManagerSVN $BootMgr_File
-
-        if ($BootMgr_FileSVN -ne $null) {
-            "{0}{1}`n{2}File Version: {3}, SVN {4}" -f $Tab8, $BootMgr_File, $Tab8, (Get-ProductVersion $BootMgr_File), $BootMgr_FileSVN
-        }
-        else {
-            "{0}{1}`n{2}File Version: {3}" -f $Tab8, $BootMgr_File, $Tab8, (Get-ProductVersion $BootMgr_File)
-        }
-    }
+    Validate-BootMgr_File -BootMgr_File $BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
 
     $WindowsUEFICA2023Capable = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name WindowsUEFICA2023Capable -ErrorAction SilentlyContinue
 
     if ($WindowsUEFICA2023Capable -ne $null) {
-        "`n{0}Registry: WindowsUEFICA2023Capable = {1}" -f $Tab4, $WindowsUEFICA2023Capable
+        '{0}Registry: WindowsUEFICA2023Capable = {1}' -f $Tab4, $WindowsUEFICA2023Capable
 
         switch ($WindowsUEFICA2023Capable) {
             0  { '{0}[Windows UEFI CA 2023] not in UEFI DB.' -f $Tab8 }
@@ -1484,22 +1420,32 @@ $ScriptBlock = {
 
     if ($VBS_Enabled) {
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
-            $SkuSiPolicy_File_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
-            $EFI_SkuSiPolicy_File_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
+            $SkuSiPolicyFile_Hash = (Get-FileHash $SkuSiPolicy_File).Hash
+            $EFI_SkuSiPolicyFile_Hash = (Get-FileHash -LiteralPath $EFI_SkuSiPolicy_File).Hash
 
-            if ($EFI_SkuSiPolicy_File_Hash -eq $SkuSiPolicy_File_Hash) {
-                "`n{0}SkuSiPolicy.p7b is CURRENT." -f $Tab4
+            $EFI_SkuSiPolicyVersion = [string](Get-SkuSiPolicyVersion $EFI_SkuSiPolicy_File)
+
+            if ($EFI_SkuSiPolicyFile_Hash -eq $SkuSiPolicyFile_Hash) {
+                if ($Verbose) {
+                    "`n{0}SkuSiPolicy.p7b is CURRENT." -f $Tab4
+                    "{0}{1}`n{2}Version: {3}" -f $Tab8, $EFI_SkuSiPolicy_File, $Tab8, $EFI_SkuSiPolicyVersion
+                }
+                else {
+                    "`n{0}SkuSiPolicy.p7b is CURRENT." -f $Tab4
+                }
             }
             else {
-                "`n{0}SkuSiPolicy.p7b is WRONG VERSION." -f $Tab4
-            }
-
-            if ($Verbose) {
-                "{0}{1}`n{2}Version: {3}" -f $Tab8, $EFI_SkuSiPolicy_File, $Tab8, [string](Get-CIPolicyVersion $EFI_SkuSiPolicy_File)
+                if ($Verbose) {
+                    "`n{0}SkuSiPolicy.p7b Version: {1} is WRONG VERSION." -f $Tab4, $EFI_SkuSiPolicyVersion
+                    "{0}{1}`n{2}Version: {3}" -f $Tab8, $EFI_SkuSiPolicy_File, $Tab8, $EFI_SkuSiPolicyVersion
+                }
+                else {
+                }
+                    "`n{0}SkuSiPolicy.p7b is WRONG VERSION." -f $Tab4
             }
         }
         else {
-            "`n{0}SkuSiPolicy.p7b (for VBS) is MISSING. [OPTIONAL]" -f $Tab4
+            "`n{0}[OPTIONAL] SkuSiPolicy.p7b (for VBS) is MISSING." -f $Tab4
         }
     }
 
@@ -1520,17 +1466,15 @@ $ScriptBlock = {
         }
     }
 
-    switch ($UpdateFlags) {
-        0x100 {
-            $UpdateMessage = 'To install Windows Boot Manager [UEFI CA 2023]'
+    if ($UpdateFlags -eq 0x100) {
+        $UpdateMessage = 'To install Windows Boot Manager [UEFI CA 2023]'
+    }
+    else {
+        if ($RevokeFlags) {
+            $UpdateMessage = 'To install [UEFI CA 2023] certs WITHOUT REVOKING the [PCA 2011] cert'
         }
-        default {
-            if ($RevokeFlags) {
-                $UpdateMessage = 'To install [UEFI CA 2023] certs WITHOUT REVOKING the [PCA 2011] cert'
-            }
-            else {
-                $UpdateMessage = 'To install [UEFI CA 2023] certs'
-            }
+        else {
+            $UpdateMessage = 'To install [UEFI CA 2023] certs'
         }
     }
 
@@ -1539,7 +1483,12 @@ $ScriptBlock = {
             $RevokeMessage = 'To install [UEFI CA 2023] certs and REVOKE the [PCA 2011] cert'
         }
         else {
-            $RevokeMessage = 'To revoke the [PCA 2011] cert'
+            if ($RevokeFlags -eq 0x200) {
+                $RevokeMessage = 'To install the DBX SVN'
+            }
+            else {
+                $RevokeMessage = 'To revoke the [PCA 2011] cert'
+            }
         }
     }
 
@@ -1573,7 +1522,7 @@ $ScriptBlock = {
             $MergedFlags = $UpdateFlags -bor $RevokeFlags
 
             if ($UpdateFlags -and $RevokeFlags) {
-                "`nOPTION 1:  DO NOTHING.  Windows will apply the UEFI updates in 2026 (supported BIOS)."
+                "`nOPTION 1:  DO NOTHING.  Windows will apply the UEFI updates (PC has supported BIOS)."
 
                 "`nOPTION 2:  {0}, run the commands:`n" -f $UpdateMessage
 
@@ -1613,7 +1562,7 @@ $ScriptBlock = {
             }
 
             if ($UpdateSkuSiPolicy) {
-                "`nTo update SkuSiPolicy.p7b [OPTIONAL], run the command:"
+                "`n[OPTIONAL] To update SkuSiPolicy.p7b, run the command:"
                 '{0}Update_UEFI-CA2023.ps1 -SkuSiPolicy' -f $Tab4
             }
 
@@ -1624,6 +1573,10 @@ $ScriptBlock = {
 
                 "Enter the BIOS menu, and search for User or Custom Mode option of updating the UEFI PK or KEK keys."
                 "If your BIOS doesn't support this feature, select Setup Mode to clear all certs."
+
+                if ($WindowsHello) {
+                    "`nIMPORTANT: Disable Windows Hello PIN before clearing certs."
+                }
             }
 
             "`nOPTION 1:  To install [UEFI CA 2023] certs WITHOUT REVOKING the [PCA 2011] cert, run the command:`n"
@@ -1641,7 +1594,7 @@ $ScriptBlock = {
             "{0}Registry: UEFICA2023Status = {1}`n" -f $Tab4, $UEFICA2023Status
         }
 
-        'SUCCESS: UPDATES ARE FINISHED.  UEFI CA 2023 certs are present, PCA 2011 cert is revoked.'
+        "{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked.`n" -f $Tab4, $Tab4
     }
 }
 
