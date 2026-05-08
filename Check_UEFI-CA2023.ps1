@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.08
+.VERSION 2026.05.08.01
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.08'
+$ScriptVersion = '2026.05.08.01'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -949,7 +949,7 @@ function Audit-UEFI {
         $script:RevokeFlags = $script:RevokeFlags -bor 0x2
     }
 
-    if ($DBX_BootMgrSVN -eq $null) {
+    if ($UEFI_SVN -eq $null) {
         $CheckList += "{0,-3} Windows BootMgr SVN is missing from UEFI DBX`n" -f ('{0}.' -f $index++)
         $script:RevokeFlags = $script:RevokeFlags -bor 0x200
     }
@@ -1079,7 +1079,7 @@ function Validate-BootMgrFile
         $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
         $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-        if ($DBX_BootMgrSVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+        if ($UEFI_SVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
             '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
         }
         else {
@@ -1481,14 +1481,14 @@ $ScriptBlock = {
         Print-UEFICerts -Name 'DBX' -CertArray ([ref]$dbx_Certs)
     }
 
-    $DBX_BootMgrSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
+    $UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
-    if ($DBX_BootMgrSVN -ne $null) {
-        '{0}Windows BootMgr SVN {1}' -f $Tab4, $DBX_BootMgrSVN
+    if ($UEFI_SVN -ne $null) {
+        '{0}Windows BootMgr SVN {1}' -f $Tab4, $UEFI_SVN
     }
 
     if ($Verbose) {
-        if ($DBX_BootMgrSVN -eq $null) {
+        if ($UEFI_SVN -eq $null) {
             '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
         }
 
