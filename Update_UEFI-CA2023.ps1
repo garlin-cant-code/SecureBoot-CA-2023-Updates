@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.04.24
+.VERSION 2026.05.08
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -45,9 +45,6 @@
 .PARAMETER SkuSiPolicy
     Deploy \Windows\System32\SecureBootUpdates\SkuSiPolicy.p7b to EFI partition.
 
-.PARAMETER SBAT
-    Apply optional Secure Boot Advanced Targeting (SBAT) update, when sharing UEFI with Linux OS'es.
-
 .PARAMETER BootMedia
     Check boot files on all mounted removable media, and replace with [UEFI CA 2023] version if needed.
 
@@ -71,7 +68,7 @@ param (
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [ValidateScript({ if (Test-Path $_ ) { $true } else { throw "Folder `"$_`" not found." } })]
-    [string]$UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates",
+    [string]$UpdatesFolder = $(if ([Environment]::Is64BitProcess) { "$env:SystemRoot\System32\SecureBootUpdates" } else { "$env:SystemRoot\SysNative\SecureBootUpdates" }),
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Audit,
@@ -86,9 +83,6 @@ param (
     [switch]$SkuSiPolicy,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$SBAT,
-
-    [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$BootMedia,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
@@ -98,12 +92,12 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.04.24'
+$ScriptVersion = '2026.05.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
-$EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
-$EFI_CDBOOT_DBXSVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
-$EFI_WDSMGR_DBXSVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
+$EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
+$EFI_CDBOOT_SVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
+$EFI_WDSMGR_SVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 
 $VMWARE_GUID = 'a3d5e95b-0a8f-4753-8735-445afb708f62'
 
@@ -225,6 +219,50 @@ function Confirm-MinimumUBR {
     }
 
     return $true
+}
+
+function Suspend-Protection {
+    $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
+
+    if ($ProtectionStatus -eq 'On') {
+        $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
+
+        if ($DeviceGuard_Running -eq 1) {
+            'Suspending BitLocker for two reboots (Device Guard).'
+            $RebootCount = 3
+        }
+        else {
+            'Suspending BitLocker for one reboot.'
+            $RebootCount = 1
+        }
+
+        try {
+            $null = Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $RebootCount
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
+        }
+    }
+}
+
+function Print-Header {
+    param (
+        [Parameter(Mandatory=$false)]
+        [switch]$Bold,
+
+        [Parameter(Mandatory)]
+        [string]$Header
+    )
+
+    if ($Bold) {
+        $Separator = '='
+    }
+    else {
+        $Separator = '-'
+    }
+
+    return ("{0}`n{1}" -f $Header, ($Header -replace "`n" -replace '(.)',$Separator))
 }
 
 function Get-UefiDatabaseSignatures {
@@ -486,10 +524,10 @@ function Get-SignatureDataSVN {
     return $SVN
 }
 
-function Get-SecureBootUEFI_DBXSVN {
+function Get-SecureBootUEFI_SVN {
     param (
         [Parameter(Mandatory)]
-        [string]$DBXSVN
+        [string]$SVN
     )
 
     try {
@@ -504,10 +542,10 @@ function Get-SecureBootUEFI_DBXSVN {
         }
     }
 
-    $LastSig = $SignatureData -match "^$DBXSVN" | sort | select -Last 1
+    $LatestSVN = $SignatureData -match "^$SVN" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
 
-    if ($LastSig.Count) {
-        $SVN = Get-SignatureDataSVN $LastSig
+    if ($LatestSVN.Count) {
+        $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
     }
     else {
         $SVN = $null
@@ -516,8 +554,8 @@ function Get-SecureBootUEFI_DBXSVN {
     return $SVN
 }
 
-function Get-WindowsUpdate_DBXSVN {
-    $DBXUpdateSVN_File = "$env:SystemRoot\System32\SecureBootUpdates\DBXUpdateSVN.bin"
+function Get-DBXUpdateSVN {
+    $DBXUpdateSVN_File = "$UpdatesFolder\DBXUpdateSVN.bin"
 
     try {
         $Signatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdateSVN_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
@@ -527,7 +565,7 @@ function Get-WindowsUpdate_DBXSVN {
         exit 1
     }
 
-    $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_DBXSVN_GUID"
+    $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_SVN_GUID"
     $Count = $SignatureData.Count
 
     if ($Count -eq 0) {
@@ -535,6 +573,108 @@ function Get-WindowsUpdate_DBXSVN {
     }
 
     return (Get-SignatureDataSVN $($SignatureData))
+}
+
+function Match-DBXSignatureData {
+    <#
+        .SYNOPSIS
+        Parses EFI signatures from a DBX Update .bin file and compares the entire list against the current UEFI DBX.
+
+        .DESCRIPTION
+        https://gist.github.com/out0xb2/f8e0bae94214889a89ac67fceb37f8c0#file-check-dbx-ps1
+
+        Modified By: github.com/cjee21
+        Modified By: garlin (@garlin-cant-code)
+
+        .PARAMETER DBXUpdateFile
+        Specifies a filename containing signed DBX Update signatures
+
+        .OUTPUTS
+        $true or $false
+    #>
+
+    param (
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DBXUpdate_File
+    )
+
+    if (-not (Test-Path $DBXUpdate_File)) {
+        Write-Host "DBX update file `"$DBXUpdate_File`" not found." -Foreground Red
+        exit 1
+    }
+
+    try {
+        $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdate_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
+    }
+    catch {
+        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdate_File" -Foreground Red
+        return $true
+    }
+
+    try {
+        $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+    }
+    catch {
+        if ($_.Exception.Message -match '0xC0000100') {
+            return $false
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
+
+    $RequiredSignatureData = $RequiredSignatures.SignatureList.SignatureData
+    $RequiredCount = $RequiredSignatureData.Count
+
+    if ($RequiredCount -eq 0) {
+        Write-Host "No DBX signatures in $DBXUpdate_File" -Foreground Red
+        return $true
+    }
+
+    $Matched = 0
+
+    foreach ($RequiredSig in $RequiredSignatureData) {
+        if ($DBXSignatureData -contains $RequiredSig) {
+            $Matched++
+        }
+        else {
+            $RequiredSVN = Get-SignatureDataSVN $RequiredSig
+
+            switch ($RequiredSig) {
+                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
+
+                    if ($CurrentSVN -ge $RequiredSVN) {
+                        $Matched++
+                    }
+                }
+
+                { $_ -match "^$EFI_CDBOOT_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
+
+                    if ($CurrentSVN -ge $RequiredSVN) {
+                        $Matched++
+                    }
+                }
+
+                { $_ -match "^$EFI_WDSMGR_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
+
+                    if ($CurrentSVN -ge $RequiredSVN) {
+                        $Matched++
+                    }
+                }
+            }
+        }
+    }
+
+    if ($Matched -eq $RequiredCount) {
+        return $true
+    }
+    else {
+        return $false
+    }
 }
 
 function Get-SkuSiPolicyVersion {
@@ -554,6 +694,23 @@ function Get-SkuSiPolicyVersion {
     }
 
     return $Version
+}
+
+function Get-SbatLevel {
+    $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction SilentlyContinue)
+
+    if ($SbatLevel_Bytes.Count) {
+        $SbatLevel = [System.Text.Encoding]::ASCII.GetString($SbatLevel_Bytes) -replace ' ' -replace "`0"
+
+        if ($SbatLevel -match '!SBATnotfound') {
+            $SbatLevel = $null
+        }
+    }
+    else {
+        $SbatLevel = $null
+    }
+
+    return $SbatLevel
 }
 
 function Audit-UEFI {
@@ -592,16 +749,16 @@ function Audit-UEFI {
         $CheckList += "{0,-3} [Production PCA 2011] missing from UEFI DBX (DBXUpdate2024.bin)`n" -f ('{0}.' -f $index++)
     }
 
-    if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$env:SystemRoot\System32\SecureBootUpdates\dbxupdate.bin")) {
+    if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$UpdatesFolder\dbxupdate.bin")) {
         $CheckList += "{0,-3} DBX Updates are missing from UEFI DBX (dbxupdate.bin)`n" -f ('{0}.' -f $index++)
     }
 
-    $UEFI_DBXSVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
+    $UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
-    if ($UEFI_DBXSVN -eq $null) {
+    if ($UEFI_SVN -eq $null) {
         $CheckList += "{0,-3} Windows BootMgr SVN is missing from UEFI DBX (DBXUpdateSVN.bin)`n" -f ('{0}.' -f $index++)
     }
-    elseif ((Get-WindowsUpdate_DBXSVN) -gt $UEFI_DBXSVN) {
+    elseif ((Get-DBXUpdateSVN) -gt $UEFI_SVN) {
         $CheckList += "{0,-3} SecureBootUpdates SVN is higher than UEFI DBX`n" -f ('{0}.' -f $index++)
     }
 
@@ -611,7 +768,7 @@ function Audit-UEFI {
     $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
 
-    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-WindowsUpdate_DBXSVN) -gt $UEFI_DBXSVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-DBXUpdateSVN) -gt $UEFI_SVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
     }
 
@@ -659,31 +816,6 @@ function Download-EDK2bin {
 
     foreach ($File in $DefaultBin_Files) {
         $objFolder.CopyHere("$ZIP_File\LegacyFirmwareDefaults\Firmware\$File", 0x14)
-    }
-}
-
-function Suspend-Protection {
-    $ProtectionStatus = (Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus
-
-    if ($ProtectionStatus -eq 'On') {
-        $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
-
-        if ($DeviceGuard_Running -eq 1) {
-            'Suspending BitLocker for two reboots (Device Guard).'
-            $RebootCount = 3
-        }
-        else {
-            'Suspending BitLocker for one reboot.'
-            $RebootCount = 1
-        }
-
-        try {
-            $null = Suspend-BitLocker -MountPoint $SystemDrive -RebootCount $RebootCount
-        }
-        catch {
-            $_.Exception.Message
-            exit 1
-        }
     }
 }
 
@@ -853,108 +985,6 @@ function Append-SecureBootSignedFile {
     Remove-Item $SigFile,$ContentFile -Force
 }
 
-function Match-DBXSignatureData {
-    <#
-        .SYNOPSIS
-        Parses EFI signatures from a DBX Update .bin file and compares the entire list against the current UEFI DBX.
-
-        .DESCRIPTION
-        https://gist.github.com/out0xb2/f8e0bae94214889a89ac67fceb37f8c0#file-check-dbx-ps1
-
-        Modified By: github.com/cjee21
-        Modified By: garlin (@garlin-cant-code)
-
-        .PARAMETER DBXUpdateFile
-        Specifies a filename containing signed DBX Update signatures
-
-        .OUTPUTS
-        $true or $false
-    #>
-
-    param (
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$DBXUpdateFile
-    )
-
-    if (-not (Test-Path $DBXUpdateFile)) {
-        Write-Host "DBX update file `"$DBXUpdateFile`" not found." -Foreground Red
-        exit 1
-    }
-
-    try {
-        $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdateFile)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
-    }
-    catch {
-        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdateFile" -Foreground Red
-        return $true
-    }
-
-    try {
-        $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
-    }
-    catch {
-        if ($_.Exception.Message -match '0xC0000100') {
-            return $false
-        }
-        else {
-            throw $_.Exception.Message
-        }
-    }
-
-    $RequiredSignatureData = $RequiredSignatures.SignatureList.SignatureData
-    $RequiredCount = $RequiredSignatureData.Count
-
-    if ($RequiredCount -eq 0) {
-        Write-Host "No DBX signatures in $DBXUpdateFile" -Foreground Red
-        return $true
-    }
-
-    $Matched = 0
-
-    foreach ($RequiredSig in $RequiredSignatureData) {
-        if ($DBXSignatureData -contains $RequiredSig) {
-            $Matched++
-        }
-        else {
-            $RequiredSVN = Get-SignatureDataSVN $RequiredSig
-
-            switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
-
-                    if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
-                    }
-                }
-
-                { $_ -match "^$EFI_CDBOOT_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_CDBOOT_DBXSVN_GUID
-
-                    if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
-                    }
-                }
-
-                { $_ -match "^$EFI_WDSMGR_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_WDSMGR_DBXSVN_GUID
-
-                    if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
-                    }
-                }
-            }
-        }
-    }
-
-    if ($Matched -eq $RequiredCount) {
-        return $true
-    }
-    else {
-        return $false
-    }
-}
-
 function Update-PK_Cert {
     # Pre-signed object for Windows OEM Devices PK
 
@@ -1060,25 +1090,6 @@ function Update-KEK_Cert {
     }
 }
 
-function Print-Header {
-    param (
-        [Parameter(Mandatory=$false)]
-        [switch]$Bold,
-
-        [Parameter(Mandatory)]
-        [string]$Header
-    )
-
-    if ($Bold) {
-        $Separator = '='
-    }
-    else {
-        $Separator = '-'
-    }
-
-    return ("{0}`n{1}" -f $Header, ($Header -replace "`n" -replace '(.)',$Separator))
-}
-
 function Update-EFI_BootManager {
     'Copying EFI boot files.'
     $EFI_DriveLetter = (& mountvol) -split "`n" | foreach { if ($_ -match '(.*mounted at )(.*)(\\)') { $Matches[2] } }
@@ -1169,9 +1180,15 @@ $ScriptBlock = {
     }
 
     $NGC_Credential_Provider = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{D6886603-9D2F-4EB2-B667-1971041FA96B}'
-    $LogonCreds_Count = ((Get-ChildItem -Path $NGC_Credential_Provider) | where { (Get-ItemProperty $_.PSPath).LogonCredsAvailable -eq 1 }).Count
 
-    if ($LogonCreds_Count -gt 0) {
+    try {
+        $LogonCreds_Count = ((Get-ChildItem -Path $NGC_Credential_Provider) | where { (Get-ItemProperty $_.PSPath).LogonCredsAvailable -eq 1 }).Count
+    }
+    catch {
+        $LogonCreds_Count = 0
+    }
+
+    if ($LogonCreds_Count) {
         $WindowsHello = $true
     }
 
@@ -1227,14 +1244,14 @@ $ScriptBlock = {
         exit 1
     }
 
-    $SystemDisk = (Get-CimInstance -Namespace 'Root\CIMv2' -Query 'SELECT * FROM Win32_DiskPartition' | where { $_.Type -eq 'GPT: System' }).DiskIndex
-    $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
+    $null = (Get-CimInstance -ClassName Win32_BootConfiguration).Caption -match '(\d+)(.*)(\d+)'
+    $GUID = (Get-Partition -DiskNumber $Matches[1] -PartitionNumber $Matches[3]).Guid
 
     $EFI_Path = "\\?\Volume$GUID\EFI"
     $EFI_FolderPath = "$EFI_Path\Certs"
 
     $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
-    $SkuSiPolicy_File = "$env:SystemRoot\System32\SecureBootUpdates\SkuSiPolicy.p7b"
+    $SkuSiPolicy_File = "$UpdatesFolder\SkuSiPolicy.p7b"
 
     $BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
     $EFI_SkuSiPolicy_File = "$EFI_Path\Microsoft\Boot\SkuSiPolicy.p7b"
@@ -1361,7 +1378,7 @@ $ScriptBlock = {
         if ('Microsoft Windows Production PCA 2011' -in (Get-UEFICert dbx)) {
             if (-not $(Match-DBXSignatureData $DBXUpdateSVN_bin)) {
                 $Result = Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdateSVN_bin
-                $SVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
+                $SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
                 $Result -replace ' to'," (SVN $SVN) to"
                 $UEFI_Updated = $true
@@ -1375,6 +1392,12 @@ $ScriptBlock = {
     $AvailableUpdates = 0
 
     if ($SkuSiPolicy) {
+        $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity' -ErrorAction SilentlyContinue
+
+        if ($CodeIntegrity -eq 1) {
+            $UEFI_Lock = $true
+        }
+
         $SkuSiPolicyFile_Version = Get-SkuSiPolicyVersion $SkuSiPolicy_File
 
         if ((Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
@@ -1385,7 +1408,10 @@ $ScriptBlock = {
 
             if (($EFI_SkuSiPolicyFile_Hash -ne $SkuSiPolicyFile_Hash) -and ([Version]$SkuSiPolicyFile_Version -gt [Version]$EFI_SkuSiPolicyFile_Version)) {
                 Copy-Item $SkuSiPolicy_File "$EFI_SkuSiPolicy_File" -Force
-                # $AvailableUpdates = $AvailableUpdates -bor 0x10
+
+                if ($UEFI_Lock) {
+                    $AvailableUpdates = $AvailableUpdates -bor 0x10
+                }
 
                 'Deployed SkuSiPolicy.p7b, Version: {0}' -f [string]$SkuSiPolicyFile_Version
                 $UEFI_Updated = $true
@@ -1393,14 +1419,17 @@ $ScriptBlock = {
         }
         else {
             Copy-Item $SkuSiPolicy_File "$EFI_SkuSiPolicy_File" -Force
-            # $AvailableUpdates = $AvailableUpdates -bor 0x10
+
+            if ($UEFI_Lock) {
+                $AvailableUpdates = $AvailableUpdates -bor 0x10
+            }
 
             'Deployed SkuSiPolicy.p7b, Version: {0}' -f [string]$SkuSiPolicyFile_Version
             $UEFI_Updated = $true
         }
     }
 
-    if ($SBAT) {
+    if ($SecureBoot -and -not (Get-SbatLevel)) {
         $AvailableUpdates = $AvailableUpdates -bor 0x400
 
         'Applying SBAT update for Linux.'
@@ -1435,22 +1464,31 @@ $ScriptBlock = {
             }
             else {
                 foreach ($Volume in $RemovableDrives) {
-                    $DriveLetter = $Volume.DriveLetter
-                    $EFI_BootMgr = "${DriveLetter}:\EFI\Microsoft\Boot\bootmgfw.efi"
-                    $EFI_BootFile = "${DriveLetter}:\EFI\Boot\boot${EDK2_Arch}.efi"
+                    $DriveLetter = $Volume.DriveLetter + ':'
+                    $EFI_BootMgr = "$DriveLetter\EFI\Microsoft\Boot\bootmgfw.efi"
+                    $EFI_BootFile = "$DriveLetter\EFI\Boot\boot${EDK2_Arch}.efi"
 
                     if (-not (Test-Path $EFI_BootMgr) -and -not (Test-Path $EFI_BootFile)) {
                         continue
                     }
 
+                    $Label = $Volume.FileSystemLabel
+
                     if (Test-Path $EFI_BootMgr) {
                         $EFI_BootMgr_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr).Hash
 
                         if ($EFI_BootMgr_Hash -ne $BootMgrEX_File_Hash) {
-                            $BCD = "${DriveLetter}:\EFI\Microsoft\Boot\BCD"
+                            $BCD = "$DriveLetter\EFI\Microsoft\Boot\BCD"
                             $Backup_BCD = "$env:TEMP\BCD.BAK"
 
                             try {
+                                if ($Label -ne '') {
+                                    'Updating WinRE boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
+                                }
+                                else {
+                                    'Updating WinRE boot media on USB Drive {0}' -f $DriveLetter
+                                }
+
                                 Copy-Item $BCD $Backup_BCD -Force
                                 Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
                                 Copy-Item $Backup_BCD $BCD -Force
@@ -1466,13 +1504,13 @@ $ScriptBlock = {
                         $EFI_BootFile_Hash = (Get-FileHash -LiteralPath $EFI_BootFile).Hash
 
                         if ($EFI_BootFile_Hash -ne $BootMgrEX_File_Hash) {
-                            $Label = (Get-Volume -DriveLetter $DriveLetter).FileSystemLabel
+                            $Label = (Get-Volume -DriveLetter $Volume.DriveLetter).FileSystemLabel
 
                             if ($Label -ne '') {
-                                '{0}Copying EFI boot file to USB Drive {1}: "{2}"' -f $Tab4, $DriveLetter, $Label
+                                'Updating WinPE boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
                             }
                             else {
-                                '{0}Copying EFI boot file to USB Drive {1}:' -f $Tab4, $DriveLetter
+                                'Updating WinPE boot media on USB Drive {0}' -f $DriveLetter
                             }
 
                             try {

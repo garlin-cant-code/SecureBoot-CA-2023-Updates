@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.04.24
+.VERSION 2026.05.08
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,18 +77,25 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.04.24'
+$ScriptVersion = '2026.05.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
-$EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
-$EFI_CDBOOT_DBXSVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
-$EFI_WDSMGR_DBXSVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
+$EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
+$EFI_CDBOOT_SVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
+$EFI_WDSMGR_SVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 
 $VMWARE_GUID = 'a3d5e95b-0a8f-4753-8735-445afb708f62'
 
 $CN_Regex = '(CN=)([^,]+)'
 
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
+
+if ([Environment]::Is64BitProcess) {
+    $UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates"
+}
+else {
+    $UpdatesFolder = "$env:SystemRoot\SysNative\SecureBootUpdates"
+}
 
 $Tab4 = ' ' * 4
 $Tab8 = ' ' * 8
@@ -120,6 +127,157 @@ if ($PSBoundParameters['Verbose']) {
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
+
+function Confirm-MinimumUBR {
+    $Build = $CurrentVersion.CurrentBuildNumber
+    $UBR = $CurrentVersion.UBR
+    $Release = $CurrentVersion.DisplayVersion
+
+    switch ($Build) {
+        14393 {
+            if ($UBR -lt 9060) {
+                return "Update Windows $Release to KB5082198 (Apr 2026) or later"
+            }
+        }
+
+        17763 {
+            if ($UBR -lt 8644) {
+                return "Update Windows $Release to KB5082123 (Apr 2026) or later"
+            }
+        }
+
+        { $_ -in 19044,19045 } {
+            if ($UBR -lt 7184) {
+                return "Update W10 $Release to KB5082200 (Apr 2026) or later"
+            }
+        }
+
+        20348 {
+            if ($UBR -lt 5020) {
+                return "Update Server 2022 to KB5082142 (Apr 2026) or later"
+            }
+        }
+
+        22000 {
+            if ($UBR -lt 3260) {
+                return "Update W11 21H2 to KB5044280 (Oct 2025) or later"
+            }
+        }
+
+        { $_ -in 22621,22631 } {
+            if ($UBR -lt 6936) {
+                return "Update W11 $Release to KB5082052 (Apr 2026) or later"
+            }
+        }
+
+        25398 {
+            if ($UBR -lt 2274) {
+                return "Update Server 23H2 to KB5082060 (Apr 2026) or later"
+            }
+        }
+
+        { $_ -in 26100,26200 } {
+            if ($UBR -lt 8246) {
+                return "Update W11 $Release to KB5083769 (Apr 2026) or later"
+            }
+        }
+
+        28000 {
+            if ($UBR -lt 1836) {
+                return "Update W11 26H1 to KB5083768 (Apr 2026) or later"
+            }
+        }
+
+        { $_ -gt 26200 } {
+            return "Cannot confirm if W11 $Release (${Build}.$UBR) has the latest files"
+        }
+
+        default {
+            return "Windows $Release ${Build}.$UBR is unsupported"
+        }
+    }
+
+    return $true
+}
+
+function Get-HarddiskVolume {
+    <#
+        https://superuser.com/a/1401025
+        Author: phant0m
+        Modified By: garlin (@garlin-cant-code)
+    #>
+
+    param (
+        [Parameter(Mandatory)]
+        [string]$VolumeGUID
+    )
+
+    Add-Type -MemberDefinition @'
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetVolumePathNamesForVolumeNameW([MarshalAs(UnmanagedType.LPWStr)] string lpszVolumeName,
+            [MarshalAs(UnmanagedType.LPWStr)] [Out] StringBuilder lpszVolumeNamePaths, uint cchBuferLength, ref UInt32 lpcchReturnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr FindFirstVolume([Out] StringBuilder lpszVolumeName, uint cchBufferLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool FindNextVolume(IntPtr hFindVolume, [Out] StringBuilder lpszVolumeName, uint cchBufferLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern uint QueryDosDevice(string lpDeviceName, StringBuilder lpTargetPath, int ucchMax);
+'@ -Name Kernel32 -Namespace Win32 -Using System.Text
+
+    [UInt32]$Max = 65535
+
+    $VolumeName = New-Object System.Text.StringBuilder($Max, $Max)
+    $PathName = New-Object System.Text.StringBuilder($Max, $Max)
+    $MountPoint = New-Object System.Text.StringBuilder($Max, $Max)
+    [IntPtr]$VolumeHandle = [Win32.Kernel32]::FindFirstVolume($VolumeName, $Max)
+
+    do {
+        $Volume = $VolumeName.toString()
+        $ReturnLength = [Win32.Kernel32]::QueryDosDevice($Volume.Substring(4, $Volume.Length - 5), $PathName, [UInt32]$Max)
+
+        if ($ReturnLength) {
+            if ($VolumeName -match $VolumeGUID) {
+                $DevicePath = '\\.\{0}' -f ($PathName -split '\\')[-1]
+                return $DevicePath
+            }
+        }
+    } while ([Win32.Kernel32]::FindNextVolume([IntPtr] $VolumeHandle, $VolumeName, $Max))
+
+    return $null
+}
+
+function Get-ProductVersion {
+    param (
+        [Parameter(Mandatory)]
+        [string]$File
+    )
+
+    $ProductVersion = (Get-Item -LiteralPath $File).VersionInfo.ProductVersion -replace '^10.0.'
+    return $ProductVersion
+}
+
+function Print-Header {
+    param (
+        [Parameter(Mandatory=$false)]
+        [switch]$Bold,
+
+        [Parameter(Mandatory)]
+        [string]$Header
+    )
+
+    if ($Bold) {
+        $Separator = '='
+    }
+    else {
+        $Separator = '-'
+    }
+
+    return ("`n{0}`n{1}" -f $Header, ($Header -replace "`n" -replace '(.)',$Separator))
+}
 
 function Get-UefiDatabaseSignatures {
     <#
@@ -347,25 +505,6 @@ function Get-UEFICert {
     return $Certs
 }
 
-function Print-Header {
-    param (
-        [Parameter(Mandatory=$false)]
-        [switch]$Bold,
-
-        [Parameter(Mandatory)]
-        [string]$Header
-    )
-
-    if ($Bold) {
-        $Separator = '='
-    }
-    else {
-        $Separator = '-'
-    }
-
-    return ("`n{0}`n{1}" -f $Header, ($Header -replace "`n" -replace '(.)',$Separator))
-}
-
 function Print-UEFICerts {
     param (
         [Parameter(Mandatory)]
@@ -396,242 +535,6 @@ function Print-UEFICerts {
     }
     else {
         '{0}(NONE)' -f $Tab4
-    }
-}
-
-function Check-TrustedPK {
-    try {
-        $PKSignatureList = (Get-SecureBootUEFI PK | Get-UefiDatabaseSignatures).SignatureList
-    }
-    catch {
-        if ($_.Exception.Message -match '0xC0000100') {
-            return $false
-        }
-        else {
-            throw $_.Exception.Message
-        }
-    }
-
-    if ($PKSignatureList -eq $null) {
-        return $false
-    }
-
-    if ($PKSignatureList.SignatureData.Subject -notmatch 'DO NOT |Example') {
-        return $true
-    }
-    else {
-        return $false
-    }
-}
-
-function Check-KEKUpdateMap {
-    try {
-        $JSON = (Invoke-WebRequest -UseBasicParsing -Uri $KEKUpdateMap_URL).Content | ConvertFrom-Json
-    }
-    catch {
-        return (($_.Exception.Message -split "`n") | select -First 1)
-    }
-
-    try {
-        $PK_Thumbprint = (Get-UefiDatabaseSignatures -BytesIn (Get-SecureBootUEFI PK).Bytes).SignatureList.SignatureData.Thumbprint
-    }
-    catch {
-        if ($_.Exception.Message -match '0xC0000100') {
-            return $null
-        }
-        else {
-            throw $_.Exception.Message
-        }
-    }
-
-    if ($JSON.$PK_Thumbprint.KEKUpdate -ne $null) {
-        $script:SignedKEK = $true
-        return $JSON.$PK_Thumbprint.KEKUpdate
-    }
-    else {
-        return $null
-    }
-}
-
-function Get-SignatureDataSVN {
-    param (
-        [Parameter(Mandatory)]
-        [string]$SignatureData
-    )
-
-    # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
-    $SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
-
-    return $SVN
-}
-
-function Get-SecureBootUEFI_DBXSVN {
-    param (
-        [Parameter(Mandatory)]
-        [string]$DBXSVN
-    )
-
-    try {
-        $SignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
-    }
-    catch {
-        if ($_.Exception.Message -match '0xC0000100') {
-            return $null
-        }
-        else {
-            throw $_.Exception.Message
-        }
-    }
-
-    $LastSig = $SignatureData -match "^$DBXSVN" | sort | select -Last 1
-
-    if ($LastSig.Count) {
-        $SVN = Get-SignatureDataSVN $LastSig
-    }
-    else {
-        $SVN = $null
-    }
-
-    return $SVN
-}
-
-function Get-WindowsUpdate_DBXSVN {
-    $DBXUpdateSVN_File = "$env:SystemRoot\System32\SecureBootUpdates\DBXUpdateSVN.bin"
-
-    try {
-        $Signatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdateSVN_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
-    }
-    catch {
-        $_.Exception.Message
-        exit 1
-    }
-
-    $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_DBXSVN_GUID"
-    $Count = $SignatureData.Count
-
-    if ($Count -eq 0) {
-        return $null
-    }
-
-    return (Get-SignatureDataSVN $($SignatureData))
-}
-
-function Get-BootManagerSVN {
-    param (
-        [Parameter(Mandatory)]
-        [string]$BootMgr_File
-    )
-
-    # Get-SecureBootSVN is only available in W11 Feb 2026 Preview or later releases
-    try {
-        $BootMgrSVN = (Get-SecureBootSVN -BootManagerPath $BootMgr_File).BootManagerSVN
-    }
-    catch {
-        $BootMgrSVN = $null
-    }
-
-    return $BootMgrSVN
-}
-
-function Match-DBXSignatureData {
-    <#
-        .SYNOPSIS
-        Parses EFI signatures from a DBX Update .bin file and compares the entire list against the current UEFI DBX.
-
-        .DESCRIPTION
-        https://gist.github.com/out0xb2/f8e0bae94214889a89ac67fceb37f8c0#file-check-dbx-ps1
-
-        Modified By: github.com/cjee21
-        Modified By: garlin (@garlin-cant-code)
-
-        .PARAMETER DBXUpdateFile
-        Specifies a filename containing signed DBX Update signatures
-
-        .OUTPUTS
-        $true or $false
-    #>
-
-    param (
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$DBXUpdateFile
-    )
-
-    if (-not (Test-Path $DBXUpdateFile)) {
-        Write-Host "DBX update file `"$DBXUpdateFile`" not found." -Foreground Red
-        exit 1
-    }
-
-    try {
-        $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdateFile)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
-    }
-    catch {
-        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdateFile" -Foreground Red
-        return $true
-    }
-
-    try {
-        $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
-    }
-    catch {
-        if ($_.Exception.Message -match '0xC0000100') {
-            return $false
-        }
-        else {
-            throw $_.Exception.Message
-        }
-    }
-
-    $RequiredSignatureData = $RequiredSignatures.SignatureList.SignatureData
-    $RequiredCount = $RequiredSignatureData.Count
-
-    if ($RequiredCount -eq 0) {
-        Write-Host "No DBX signatures in $DBXUpdateFile" -Foreground Red
-        return $true
-    }
-
-    $Matched = 0
-
-    foreach ($RequiredSig in $RequiredSignatureData) {
-        if ($DBXSignatureData -contains $RequiredSig) {
-            $Matched++
-        }
-        else {
-            $RequiredSVN = Get-SignatureDataSVN $RequiredSig
-
-            switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
-
-                    if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
-                    }
-                }
-
-                { $_ -match "^$EFI_CDBOOT_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_CDBOOT_DBXSVN_GUID
-
-                    if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
-                    }
-                }
-
-                { $_ -match "^$EFI_WDSMGR_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_WDSMGR_DBXSVN_GUID
-
-                    if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
-                    }
-                }
-            }
-        }
-    }
-
-    if ($Matched -eq $RequiredCount) {
-        return $true
-    }
-    else {
-        return $false
     }
 }
 
@@ -690,76 +593,240 @@ function Validate-PFXCert {
     }
 }
 
-function Confirm-MinimumUBR {
-    $Build = $CurrentVersion.CurrentBuildNumber
-    $UBR = $CurrentVersion.UBR
-    $Release = $CurrentVersion.DisplayVersion
-
-    switch ($Build) {
-        14393 {
-            if ($UBR -lt 9060) {
-                return "Update Windows $Release to KB5082198 (Apr 2026) or later"
-            }
+function Check-TrustedPK {
+    try {
+        $PKSignatureList = (Get-SecureBootUEFI PK | Get-UefiDatabaseSignatures).SignatureList
+    }
+    catch {
+        if ($_.Exception.Message -match '0xC0000100') {
+            return $false
         }
-
-        17763 {
-            if ($UBR -lt 8644) {
-                return "Update Windows $Release to KB5082123 (Apr 2026) or later"
-            }
-        }
-
-        { $_ -in 19044,19045 } {
-            if ($UBR -lt 7184) {
-                return "Update W10 $Release to KB5082200 (Apr 2026) or later"
-            }
-        }
-
-        20348 {
-            if ($UBR -lt 5020) {
-                return "Update Server 2022 to KB5082142 (Apr 2026) or later"
-            }
-        }
-
-        22000 {
-            if ($UBR -lt 3260) {
-                return "Update W11 21H2 to KB5044280 (Oct 2025) or later"
-            }
-        }
-
-        { $_ -in 22621,22631 } {
-            if ($UBR -lt 6936) {
-                return "Update W11 $Release to KB5082052 (Apr 2026) or later"
-            }
-        }
-
-        25398 {
-            if ($UBR -lt 2274) {
-                return "Update Server 23H2 to KB5082060 (Apr 2026) or later"
-            }
-        }
-
-        { $_ -in 26100,26200 } {
-            if ($UBR -lt 8246) {
-                return "Update W11 $Release to KB5083769 (Apr 2026) or later"
-            }
-        }
-
-        28000 {
-            if ($UBR -lt 1836) {
-                return "Update W11 26H1 to KB5083768 (Apr 2026) or later"
-            }
-        }
-
-        { $_ -gt 26200 } {
-            return "Cannot confirm if W11 $Release (${Build}.$UBR) has the latest files"
-        }
-
-        default {
-            return "Windows $Release ${Build}.$UBR is unsupported"
+        else {
+            throw $_.Exception.Message
         }
     }
 
-    return $true
+    if ($PKSignatureList -eq $null) {
+        return $false
+    }
+
+    if ($PKSignatureList.SignatureData.Subject -notmatch 'DO NOT |Example') {
+        return $true
+    }
+    else {
+        return $false
+    }
+}
+
+function Check-KEKUpdateMap {
+    try {
+        $JSON = (Invoke-WebRequest -UseBasicParsing -Uri $KEKUpdateMap_URL).Content | ConvertFrom-Json
+    }
+    catch {
+        return (($_.Exception.Message -split "`n") | select -First 1)
+    }
+
+    try {
+        $PK_Thumbprint = (Get-UefiDatabaseSignatures -BytesIn (Get-SecureBootUEFI PK).Bytes).SignatureList.SignatureData.Thumbprint
+    }
+    catch {
+        if ($_.Exception.Message -match '0xC0000100') {
+            return $null
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
+
+    if ($JSON.$PK_Thumbprint.KEKUpdate -ne $null) {
+        $script:SignedKEK = $true
+        return $JSON.$PK_Thumbprint.KEKUpdate
+    }
+    else {
+        return $null
+    }
+}
+
+function Match-DBXSignatureData {
+    <#
+        .SYNOPSIS
+        Parses EFI signatures from a DBX Update .bin file and compares the entire list against the current UEFI DBX.
+
+        .DESCRIPTION
+        https://gist.github.com/out0xb2/f8e0bae94214889a89ac67fceb37f8c0#file-check-dbx-ps1
+
+        Modified By: github.com/cjee21
+        Modified By: garlin (@garlin-cant-code)
+
+        .PARAMETER DBXUpdateFile
+        Specifies a filename containing signed DBX Update signatures
+
+        .OUTPUTS
+        $true or $false
+    #>
+
+    param (
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DBXUpdate_File
+    )
+
+    if (-not (Test-Path $DBXUpdate_File)) {
+        Write-Host "DBX update file `"$DBXUpdate_File`" not found." -Foreground Red
+        exit 1
+    }
+
+    try {
+        $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdate_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
+    }
+    catch {
+        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdate_File" -Foreground Red
+        return $true
+    }
+
+    try {
+        $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+    }
+    catch {
+        if ($_.Exception.Message -match '0xC0000100') {
+            return $false
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
+
+    $RequiredSignatureData = $RequiredSignatures.SignatureList.SignatureData
+    $RequiredCount = $RequiredSignatureData.Count
+
+    if ($RequiredCount -eq 0) {
+        Write-Host "No DBX signatures in $DBXUpdate_File" -Foreground Red
+        return $true
+    }
+
+    $Matched = 0
+
+    foreach ($RequiredSig in $RequiredSignatureData) {
+        if ($DBXSignatureData -contains $RequiredSig) {
+            $Matched++
+        }
+        else {
+            $RequiredSVN = Get-SignatureDataSVN $RequiredSig
+
+            switch ($RequiredSig) {
+                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
+
+                    if ($CurrentSVN -ge $RequiredSVN) {
+                        $Matched++
+                    }
+                }
+
+                { $_ -match "^$EFI_CDBOOT_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
+
+                    if ($CurrentSVN -ge $RequiredSVN) {
+                        $Matched++
+                    }
+                }
+
+                { $_ -match "^$EFI_WDSMGR_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
+
+                    if ($CurrentSVN -ge $RequiredSVN) {
+                        $Matched++
+                    }
+                }
+            }
+        }
+    }
+
+    if ($Matched -eq $RequiredCount) {
+        return $true
+    }
+    else {
+        return $false
+    }
+}
+
+function Get-SignatureDataSVN {
+    param (
+        [Parameter(Mandatory)]
+        [string]$SignatureData
+    )
+
+    # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
+    $SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
+
+    return $SVN
+}
+
+function Get-SecureBootUEFI_SVN {
+    param (
+        [Parameter(Mandatory)]
+        [string]$SVN
+    )
+
+    try {
+        $SignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+    }
+    catch {
+        if ($_.Exception.Message -match '0xC0000100') {
+            return $null
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
+
+    $LatestSVN = $SignatureData -match "^$SVN" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
+
+    if ($LatestSVN.Count) {
+        $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
+    }
+    else {
+        $SVN = $null
+    }
+
+    return $SVN
+}
+
+function Get-DBXUpdateSVN {
+    $DBXUpdateSVN_File = "$UpdatesFolder\DBXUpdateSVN.bin"
+
+    try {
+        $Signatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdateSVN_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
+    }
+    catch {
+        $_.Exception.Message
+        exit 1
+    }
+
+    $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_SVN_GUID"
+    $Count = $SignatureData.Count
+
+    if ($Count -eq 0) {
+        return $null
+    }
+
+    return (Get-SignatureDataSVN $($SignatureData))
+}
+
+function Get-BootManagerSVN {
+    param (
+        [Parameter(Mandatory)]
+        [string]$BootMgr_File
+    )
+
+    # Get-SecureBootSVN is only available in W11 Feb 2026 Preview or later releases
+    try {
+        $BootMgrSVN = (Get-SecureBootSVN -BootManagerPath $BootMgr_File).BootManagerSVN
+    }
+    catch {
+        $BootMgrSVN = $null
+    }
+
+    return $BootMgrSVN
 }
 
 function Get-SkuSiPolicyVersion {
@@ -779,6 +846,47 @@ function Get-SkuSiPolicyVersion {
     }
 
     return $Version
+}
+
+function Get-UEFI_DeviceGuard {
+    $LastBootUpTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+    $Events = Get-WinEvent -FilterHashtable @{ProviderName='Microsoft-Windows-Kernel-Boot'; Id=153; StartTime=$LastBootUpTime} -ErrorAction SilentlyContinue | where { $_.Message -match 'VBS locked' }
+
+    if ($Events.Count) {
+        return $true
+    }
+    else {
+        return $false
+    }
+}
+
+function Get-UEFI_CredentialGuard {
+    $LastBootUpTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+    $Events = Get-WinEvent -FilterHashtable @{ProviderName='Microsoft-Windows-Wininit'; Id=12; StartTime=$LastBootUpTime} -ErrorAction SilentlyContinue | where { $_.Message -match 'LSASS.exe was started as a protected process with level: 4.' }
+
+    if ($Events.Count) {
+        return $true
+    }
+    else {
+        return $false
+    }
+}
+
+function Get-SbatLevel {
+    $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction SilentlyContinue)
+
+    if ($SbatLevel_Bytes.Count) {
+        $SbatLevel = [System.Text.Encoding]::ASCII.GetString($SbatLevel_Bytes) -replace ' ' -replace "`0"
+
+        if ($SbatLevel -match '!SBATnotfound') {
+            $SbatLevel = $null
+        }
+    }
+    else {
+        $SbatLevel = $null
+    }
+
+    return $SbatLevel
 }
 
 function Audit-UEFI {
@@ -823,12 +931,12 @@ function Audit-UEFI {
 
     if ('Microsoft UEFI CA 2023' -notin $db_Certs) {
         $CheckList += "{0,-3} [Microsoft UEFI CA 2023] is missing from UEFI DB`n" -f ('{0}.' -f $index++)
-        $script:UpdateFlags = $script:UpdateFlags -bor 0x1000 -bor 0x4000
+        $script:UpdateFlags = $script:UpdateFlags -bor 0x4000 -bor 0x1000
     }
 
     if ('Microsoft Option ROM UEFI CA 2023' -notin $db_Certs) {
         $CheckList += "{0,-3} [Microsoft Option ROM UEFI CA 2023] is missing from UEFI DB`n" -f ('{0}.' -f $index++)
-        $script:UpdateFlags = $script:UpdateFlags -bor 0x800 -bor 0x4000
+        $script:UpdateFlags = $script:UpdateFlags -bor 0x4000 -bor 0x800
     }
 
     if ('Microsoft Windows Production PCA 2011' -notin $dbx_Certs) {
@@ -836,18 +944,16 @@ function Audit-UEFI {
         $script:RevokeFlags = $script:RevokeFlags -bor 0x80
     }
 
-    if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$env:SystemRoot\System32\SecureBootUpdates\dbxupdate.bin")) {
+    if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$UpdatesFolder\dbxupdate.bin")) {
         $CheckList += "{0,-3} DBX Updates are missing from UEFI DBX`n" -f ('{0}.' -f $index++)
         $script:RevokeFlags = $script:RevokeFlags -bor 0x2
     }
 
-    $UEFI_DBXSVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
-
-    if ($UEFI_DBXSVN -eq $null) {
+    if ($DBX_BootMgrSVN -eq $null) {
         $CheckList += "{0,-3} Windows BootMgr SVN is missing from UEFI DBX`n" -f ('{0}.' -f $index++)
         $script:RevokeFlags = $script:RevokeFlags -bor 0x200
     }
-    elseif ((Get-WindowsUpdate_DBXSVN) -gt $UEFI_DBXSVN) {
+    elseif ((Get-DBXUpdateSVN) -gt $UEFI_SVN) {
         $CheckList += "{0,-3} SecureBootUpdates SVN is higher than UEFI DBX`n" -f ('{0}.' -f $index++)
         $script:RevokeFlags = $script:RevokeFlags -bor 0x200
     }
@@ -855,7 +961,7 @@ function Audit-UEFI {
     $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
 
-    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-WindowsUpdate_DBXSVN) -gt $UEFI_DBXSVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-DBXUpdateSVN) -gt $UEFI_SVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
         $script:UpdateFlags = $script:UpdateFlags -bor 0x100
     }
@@ -881,54 +987,120 @@ function Audit-UEFI {
     return $CheckList
 }
 
-function Get-Volume_DevicePath {
-    <#
-        https://superuser.com/a/1401025
-        Author: phant0m
-        Modified By: garlin (@garlin-cant-code)
-    #>
+function Run-FiniteStateMachine {
+    if ($UpdateFlags -band 0x100) {
+        $BootMgr_Required = $true
+    }
 
+    if ($UpdateFlags -band 0x4 -or $UpdateFlags -band 0x40 -or $UpdateFlags -band 0x800 -or $UpdateFlags -band 0x1000) {
+        $CA2023_Required = $true
+        $BootMgr_Required = $false
+    }
+
+    if ($CA2023_Required) {
+        $script:UpdateMessage = 'To install [UEFI CA 2023] certs'
+    }
+    elseif ($BootMgr_Required) {
+        if ((Get-DBXUpdateSVN) -gt $UEFI_SVN) {
+            $script:UpdateMessage = 'To update Windows Boot Manager [UEFI CA 2023]'
+        }
+        else {
+            $script:UpdateMessage = 'To install Windows Boot Manager [UEFI CA 2023]'
+        }
+    }
+
+    if ($RevokeFlags -band 0x2) {
+        $DBXUpdate_Required = $true
+    }
+
+    if ($RevokeFlags -band 0x200) {
+        $SVN_Required = $true
+    }
+
+    if ($RevokeFlags -band 0x80) {
+        $Revoke_PCA2011_Required = $true
+        $DBXUpdate_Required = $false
+        $SVN_Required = $false
+    }
+
+    if ($Revoke_PCA2011_Required) {
+        if ($UpdateFlags) {
+            $script:RevokeMessage = $script:UpdateMessage + ' and REVOKE the [PCA 2011] cert'
+        }
+        else {
+            $script:RevokeMessage = 'To REVOKE the [PCA 2011] cert'
+        }
+    }
+    elseif ($DBXUpdate_Required -and $SVN_Required) {
+        if ($UpdateFlags) {
+            $script:RevokeMessage = $script:UpdateMessage + ' and apply other DBX updates'
+        }
+        else {
+            $script:RevokeMessage = 'To apply other DBX updates'
+        }
+    }
+    elseif ($DBXUpdate_Required) {
+        if ($UpdateFlags) {
+            $script:RevokeMessage = $script:UpdateMessage + ' and update DBX signatures'
+        }
+        else {
+            $script:RevokeMessage = 'To update DBXUpdate signatures'
+        }
+    }
+    elseif ($SVN_Required) {
+        if ($UpdateFlags) {
+            $script:RevokeMessage = $script:UpdateMessage + ' and update the DBX SVN'
+        }
+        else {
+            $script:RevokeMessage = 'To update the DBX SVN'
+        }
+    }
+}
+
+function Validate-BootMgrFile
+{
     param (
         [Parameter(Mandatory)]
-        [string]$VolumeGUID
+        [string]$BootMgr_File,
+
+        [Parameter(Mandatory)]
+        [string]$Label,
+
+        [Parameter(Mandatory)]
+        [string]$Indent
     )
 
-    Add-Type -MemberDefinition @'
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        public static extern bool GetVolumePathNamesForVolumeNameW([MarshalAs(UnmanagedType.LPWStr)] string lpszVolumeName,
-            [MarshalAs(UnmanagedType.LPWStr)] [Out] StringBuilder lpszVolumeNamePaths, uint cchBuferLength, ref UInt32 lpcchReturnLength);
+    $PFXCert = Get-PFXCert $BootMgr_File
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern IntPtr FindFirstVolume([Out] StringBuilder lpszVolumeName, uint cchBufferLength);
+    if ((Validate-PFXCert $PFXCert) -eq 'BANNED') {
+        '{0}Boot File [{1}] {2} BANNED' -f $Indent, ($PFXCert -replace 'Microsoft Windows '), $Verb
+    }
+    else {
+        $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
+        $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool FindNextVolume(IntPtr hFindVolume, [Out] StringBuilder lpszVolumeName, uint cchBufferLength);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern uint QueryDosDevice(string lpDeviceName, StringBuilder lpTargetPath, int ucchMax);
-'@ -Name Win32Utils -Namespace PInvoke -Using PInvoke,System.Text
-
-    [UInt32]$Max = 65535
-
-    $VolumeName = New-Object System.Text.StringBuilder($Max, $Max)
-    $PathName = New-Object System.Text.StringBuilder($Max, $Max)
-    $MountPoint = New-Object System.Text.StringBuilder($Max, $Max)
-    [IntPtr]$VolumeHandle = [PInvoke.Win32Utils]::FindFirstVolume($VolumeName, $Max)
-
-    do {
-        $Volume = $VolumeName.toString()
-        $ReturnLength = [PInvoke.Win32Utils]::QueryDosDevice($Volume.Substring(4, $Volume.Length - 5), $PathName, [UInt32]$Max)
-
-        if ($ReturnLength) {
-            if ($VolumeName -match $VolumeGUID) {
-                $DevicePath = '\\.\{0}\' -f ($PathName -split '\\')[-1]
-                return $DevicePath
-            }
+        if ($DBX_BootMgrSVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+            '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
         }
-    } while ([PInvoke.Win32Utils]::FindNextVolume([IntPtr] $VolumeHandle, $VolumeName, $Max))
+        else {
+            '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+        }
+    }
 
-    return $null
+    if ($Verbose) {
+        $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
+        $Indent += $Tab4
+
+        if ($BootMgrSVN -ne $null) {
+            "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File), $BootMgrSVN
+        }
+        else {
+            "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File)
+        }
+    }
+    else {
+        Write-Output ''
+    }
 }
 
 function Check-WIM_BootManager {
@@ -955,64 +1127,8 @@ function Check-WIM_BootManager {
     }
 }
 
-function Get-ProductVersion {
-    param (
-        [Parameter(Mandatory)]
-        [string]$File
-    )
-
-    $ProductVersion = (Get-Item -LiteralPath $File).VersionInfo.ProductVersion -replace '^10.0.'
-    return $ProductVersion
-}
-
-function Validate-BootMgr_File
-{
-    param (
-        [Parameter(Mandatory)]
-        [string]$BootMgr_File,
-
-        [Parameter(Mandatory)]
-        [string]$Label,
-
-        [Parameter(Mandatory)]
-        [string]$Indent
-    )
-
-    $PFXCert = Get-PFXCert $BootMgr_File
-
-    if ((Validate-PFXCert $PFXCert) -eq 'BANNED') {
-        '{0}Boot File [{1}] {2} BANNED' -f $Indent, ($PFXCert -replace 'Microsoft Windows '), $Verb
-    }
-    else {
-        $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
-        $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
-
-        if ($UEFI_DBXSVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
-            '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
-        }
-        else {
-            '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
-        }
-    }
-
-    if ($Verbose) {
-        $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
-        $Indent += $Tab4
-
-        if ($BootMgrSVN -ne $null) {
-            "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File), $BootMgrSVN
-        }
-        else {
-            "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File)
-        }
-    }
-    else {
-        Write-Output ''
-    }
-}
-
 function Check-BootMedia {
-    $RemovableDrives = Get-Volume | where { $_.DriveType -in 'CD-ROM','Removable' -and $_.DriveLetter -ne $null } | sort DriveLetter
+    $RemovableDrives = Get-Volume | where { $_.DriveType -in 'CD-ROM','Removable' -and $_.DriveLetter -ne $null -and $_.OperationalStatus -eq 'OK' } | sort DriveLetter
 
     if ($RemovableDrives.Count -eq 0) {
         return
@@ -1044,10 +1160,10 @@ function Check-BootMedia {
         }
 
         if (Test-Path $EFI_BootMgr) {
-            Validate-BootMgr_File -BootMgr_File $EFI_BootMgr -Label 'Boot File' -Indent $Tab8
+            Validate-BootMgrFile -BootMgr_File $EFI_BootMgr -Label 'Windows Boot Manager' -Indent $Tab8
         }
         elseif (Test-Path $EFI_BootFile) {
-            Validate-BootMgr_File -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab8
+            Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab8
         }
 
         if (Test-Path $Boot_WIM) {
@@ -1098,6 +1214,8 @@ function Check-BootMedia {
                 if ($ImageCount -gt 1 -and -not $NoSkip) {
                     '{0}Skipping checks on next {1} install.{2} images.' -f $Tab12, --$ImageCount, $Format
                 }
+
+                Write-Output ''
             }
         }
     }
@@ -1187,9 +1305,15 @@ $ScriptBlock = {
     }
 
     $NGC_Credential_Provider = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{D6886603-9D2F-4EB2-B667-1971041FA96B}'
-    $LogonCreds_Count = ((Get-ChildItem -Path $NGC_Credential_Provider) | where { (Get-ItemProperty $_.PSPath).LogonCredsAvailable -eq 1 }).Count
 
-    if ($LogonCreds_Count -gt 0) {
+    try {
+        $LogonCreds_Count = ((Get-ChildItem -Path $NGC_Credential_Provider) | where { (Get-ItemProperty $_.PSPath).LogonCredsAvailable -eq 1 }).Count
+    }
+    catch {
+        $LogonCreds_Count = 0
+    }
+
+    if ($LogonCreds_Count) {
         $WindowsHello = $true
     }
 
@@ -1357,7 +1481,7 @@ $ScriptBlock = {
         Print-UEFICerts -Name 'DBX' -CertArray ([ref]$dbx_Certs)
     }
 
-    $DBX_BootMgrSVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
+    $DBX_BootMgrSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
     if ($DBX_BootMgrSVN -ne $null) {
         '{0}Windows BootMgr SVN {1}' -f $Tab4, $DBX_BootMgrSVN
@@ -1376,26 +1500,33 @@ $ScriptBlock = {
         }
     }
 
-    if ($Verbose) {
-        $SBATLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction SilentlyContinue)
+    $UEFI_DeviceGuard = Get-UEFI_DeviceGuard
+    $UEFI_CredentialGuard = Get-UEFI_CredentialGuard
+    $SbatLevel = Get-SbatLevel
 
-        if ($SBATLevel_Bytes.Count) {
-            $SbatLevel = [System.Text.Encoding]::ASCII.GetString($SBATLevel_Bytes) -replace ' ' -replace "`0"
+    if ($Verbose -and ($UEFI_DeviceGuard -or $UEFI_CredentialGuard -or ($SbatLevel -ne $null))) {
+        Print-Header 'UEFI Variables'
 
-            if ($SbatLevel -ne '' -and $SbatLevel -notmatch '!SBATnotfound') {
-                Print-Header 'UEFI Variable'
-                '{0}SBAT (Linux only): {1}' -f $Tab4, ($SbatLevel -replace "`n",' / ')
-            }
+        if ($UEFI_DeviceGuard) {
+            '{0}DeviceGuard (VBS): ON' -f $Tab4
+        }
+
+        if ($UEFI_CredentialGuard) {
+            '{0}Credential Guard: ON' -f $Tab4
+        }
+
+        if ($SbatLevel -ne $null) {
+            '{0}SBAT (Linux only): {1}' -f $Tab4, ($SbatLevel -replace "`n",' / ')
         }
     }
 
-    $SystemDisk = (Get-CimInstance -Namespace 'Root\CIMv2' -Query 'SELECT * FROM Win32_DiskPartition' | where { $_.Type -eq 'GPT: System' }).DiskIndex
-    $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
+    $null = (Get-CimInstance -ClassName Win32_BootConfiguration).Caption -match '(\d+)(.*)(\d+)'
+    $GUID = (Get-Partition -DiskNumber $Matches[1] -PartitionNumber $Matches[3]).Guid
 
-    $EFI_Path = '{0}EFI' -f (Get-Volume_DevicePath $GUID)
+    $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $GUID)
 
     $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
-    $SkuSiPolicy_File = "$env:SystemRoot\System32\SecureBootUpdates\SkuSiPolicy.p7b"
+    $SkuSiPolicy_File = "$UpdatesFolder\SkuSiPolicy.p7b"
 
     $BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
     $EFI_SkuSiPolicy_File = "$EFI_Path\Microsoft\Boot\SkuSiPolicy.p7b"
@@ -1403,7 +1534,7 @@ $ScriptBlock = {
     $PFXCert = Get-PFXCert $BootMgr_File
 
     Print-Header 'EFI Files'
-    Validate-BootMgr_File -BootMgr_File $BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
+    Validate-BootMgrFile -BootMgr_File $BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
 
     $WindowsUEFICA2023Capable = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name WindowsUEFICA2023Capable -ErrorAction SilentlyContinue
 
@@ -1447,6 +1578,17 @@ $ScriptBlock = {
         else {
             "`n{0}[OPTIONAL] SkuSiPolicy.p7b (for VBS) is MISSING." -f $Tab4
         }
+
+        if ([Environment]::Is64BitProcess) {
+            if ((& bcdedit | Select-String 'winload.efi').Count -gt 1) {
+                '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
+            }
+        }
+        else {
+            if ((& "$env:SystemRoot\SysNative\bcdedit" | Select-String 'winload.efi').Count -gt 1) {
+                '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
+            }
+        }
     }
 
     if ($BootMedia) {
@@ -1466,32 +1608,6 @@ $ScriptBlock = {
         }
     }
 
-    if ($UpdateFlags -eq 0x100) {
-        $UpdateMessage = 'To install Windows Boot Manager [UEFI CA 2023]'
-    }
-    else {
-        if ($RevokeFlags) {
-            $UpdateMessage = 'To install [UEFI CA 2023] certs WITHOUT REVOKING the [PCA 2011] cert'
-        }
-        else {
-            $UpdateMessage = 'To install [UEFI CA 2023] certs'
-        }
-    }
-
-    if ($RevokeFlags) {
-        if ($UpdateFlags) {
-            $RevokeMessage = 'To install [UEFI CA 2023] certs and REVOKE the [PCA 2011] cert'
-        }
-        else {
-            if ($RevokeFlags -eq 0x200) {
-                $RevokeMessage = 'To install the DBX SVN'
-            }
-            else {
-                $RevokeMessage = 'To revoke the [PCA 2011] cert'
-            }
-        }
-    }
-
     if ($UpdateFlags -or $RevokeFlags -or $UpdateSkuSiPolicy) {
         if ($BitLocker_Enabled -and $UpdateFlags -ne 0x100) {
             $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
@@ -1504,6 +1620,7 @@ $ScriptBlock = {
             }
         }
 
+        Run-FiniteStateMachine
         Print-Header -Bold "`nREQUIRED ACTION"
 
         if (('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) -and ('Windows UEFI CA 2023' -in $db_Certs)) {
@@ -1514,7 +1631,6 @@ $ScriptBlock = {
             }
 
             "Finish the UEFI steps to manually add the [KEK CA 2023] cert, if the script provided instructions.`n"
-
             break
         }
 
@@ -1522,30 +1638,35 @@ $ScriptBlock = {
             $MergedFlags = $UpdateFlags -bor $RevokeFlags
 
             if ($UpdateFlags -and $RevokeFlags) {
-                "`nOPTION 1:  DO NOTHING.  Windows will apply the UEFI updates (PC has supported BIOS)."
+                "`nOPTION 1:  DO NOTHING AND WAIT.  Windows will apply the UEFI updates (PC has supported BIOS)."
 
-                "`nOPTION 2:  {0}, run the commands:`n" -f $UpdateMessage
+                if ($RevokeFlags -band 0x80) {
+                    "`nOPTION 2:  {0} WITHOUT REVOKING the [PCA 2011] cert, run the commands:`n" -f $UpdateMessage
+                }
+                else {
+                    "`nOPTION 2:  {0}, run the commands:`n" -f $UpdateMessage
+                }
 
                 if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
 
                 '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
                 '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
 
-                "`nOPTION 3:  {0}, run the commands:`n" -f $RevokeMessage
+                "`n`nOPTION 3:  {0}, run the commands:`n" -f $RevokeMessage
 
                 if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
 
-                if ($UpdateFlags -eq 0x100) {
-                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
+                if ($UpdateFlags) {
+                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $MergedFlags
                 }
                 else {
-                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $MergedFlags
+                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
                 }
 
                 '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
             }
             elseif ($UpdateFlags) {
-                "`n{0}, run the commands:`n" -f $UpdateMessage
+                "{0}, run the commands:`n" -f $UpdateMessage
 
                 if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
 
@@ -1553,7 +1674,7 @@ $ScriptBlock = {
                 '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
             }
             elseif ($RevokeFlags) {
-                "`n{0}, run the commands:`n" -f $RevokeMessage
+                "{0}, run the commands:`n" -f $RevokeMessage
 
                 if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
 
@@ -1565,7 +1686,6 @@ $ScriptBlock = {
                 "`n[OPTIONAL] To update SkuSiPolicy.p7b, run the command:"
                 '{0}Update_UEFI-CA2023.ps1 -SkuSiPolicy' -f $Tab4
             }
-
         }
         else {
             if (-not $SetupMode) {
@@ -1579,11 +1699,11 @@ $ScriptBlock = {
                 }
             }
 
-            "`nOPTION 1:  To install [UEFI CA 2023] certs WITHOUT REVOKING the [PCA 2011] cert, run the command:`n"
-            '{0}Update_UEFI-CA2023.ps1' -f $Tab4
+            "`nOPTION 1:  {0}`n" -f $UpdateMessage
+            '{0}Update_UEFI-CA2023.ps1' -f $Tab8
 
-            "`n`nOPTION 2:  To install [UEFI CA 2023] certs and REVOKE the [PCA 2011] cert, run the command:`n"
-            '{0}Update_UEFI-CA2023.ps1 -Revoke' -f $Tab4
+            "`n`nOPTION 2:  {1}`n" -f $RevokeMessage
+            '{0}Update_UEFI-CA2023.ps1 -Revoke' -f $Tab8
         }
     }
     else {
@@ -1594,7 +1714,7 @@ $ScriptBlock = {
             "{0}Registry: UEFICA2023Status = {1}`n" -f $Tab4, $UEFICA2023Status
         }
 
-        "{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked.`n" -f $Tab4, $Tab4
+        "{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked." -f $Tab4, $Tab4
     }
 }
 

@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.04.24
+.VERSION 2026.05.08
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,12 +59,12 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.04.24'
+$ScriptVersion = '2026.05.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
-$EFI_BOOTMGR_DBXSVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
-$EFI_CDBOOT_DBXSVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
-$EFI_WDSMGR_DBXSVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
+$EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
+$EFI_CDBOOT_SVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
+$EFI_WDSMGR_SVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 
 $DBXinfo_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/DBX/dbx_info_msft_latest.json'
 
@@ -461,10 +461,10 @@ function Get-SignatureDataSVN {
     return $SVN
 }
 
-function Get-SecureBootUEFI_DBXSVN {
+function Get-SecureBootUEFI_SVN {
     param (
         [Parameter(Mandatory)]
-        [string]$DBXSVN
+        [string]$SVN
     )
 
     try {
@@ -479,10 +479,10 @@ function Get-SecureBootUEFI_DBXSVN {
         }
     }
 
-    $LastSig = $SignatureData -match "^$DBXSVN" | sort | select -Last 1
+    $LatestSVN = $SignatureData -match "^$SVN" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
 
-    if ($LastSig.Count) {
-        $SVN = Get-SignatureDataSVN $LastSig
+    if ($LatestSVN.Count) {
+        $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
     }
     else {
         $SVN = $null
@@ -555,9 +555,9 @@ function Compare-DBXSignatureData {
             $Matched++
 
             switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_DBXSVN_GUID" } { $SVN_SigCount++ }
-                { $_ -match "^$EFI_CDBOOT_DBXSVN_GUID" }  { $SVN_SigCount++ }
-                { $_ -match "^$EFI_WDSMGR_DBXSVN_GUID" }  { $SVN_SigCount++ }
+                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } { $SVN_SigCount++ }
+                { $_ -match "^$EFI_CDBOOT_SVN_GUID" }  { $SVN_SigCount++ }
+                { $_ -match "^$EFI_WDSMGR_SVN_GUID" }  { $SVN_SigCount++ }
                 default { $EFI_SigCount++ }
              }
         }
@@ -565,8 +565,8 @@ function Compare-DBXSignatureData {
             $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
             switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_BOOTMGR_DBXSVN_GUID
+                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -576,8 +576,8 @@ function Compare-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_CDBOOT_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_CDBOOT_DBXSVN_GUID
+                { $_ -match "^$EFI_CDBOOT_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -587,8 +587,8 @@ function Compare-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_WDSMGR_DBXSVN_GUID" } {
-                    $CurrentSVN = Get-SecureBootUEFI_DBXSVN $EFI_WDSMGR_DBXSVN_GUID
+                { $_ -match "^$EFI_WDSMGR_SVN_GUID" } {
+                    $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -697,7 +697,13 @@ if (Test-Path $LogFile) {
 }
 
 if ($Paths.Count -eq 0) {
-    $Paths = @("$env:SystemRoot\System32\SecureBootUpdates")
+    if ([Environment]::Is64BitProcess) {
+        $Paths = @("$env:SystemRoot\System32\SecureBootUpdates")
+    }
+    else {
+        $Paths = @("$env:SystemRoot\SysNative\SecureBootUpdates")
+    }
+
     $ShowPath = $true
 }
 else {
@@ -750,12 +756,18 @@ foreach ($item in $Paths) {
         }
     }
     else {
+        if (-not [Environment]::Is64BitProcess) {
+            $item = $item -replace 'System32\\SecureBootUpdates','SysNative\SecureBootUpdates'
+        }
+
         $Path = (Resolve-Path $item).Path
 
         if (Test-Path $Path -PathType Container) {
             foreach ($File in (Get-ChildItem $Path -File).FullName) {
                 if ($File -match '(.*dbx.*)\.bin$') {
-                    if ($File -match 'Legacy' -and $Path -eq "$env:SystemRoot\System32\SecureBootUpdates") {
+                    $regex = "$env:SystemRoot\System32\SecureBootUpdates|$env:SystemRoot\SysNative\SecureBootUpdates" -replace '\\','\\'
+
+                    if ($File -match 'Legacy' -and $Path -match $regex) {
                         continue
                     }
 
