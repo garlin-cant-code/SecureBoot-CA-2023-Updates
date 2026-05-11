@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.08
+.VERSION 2026.05.11
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.08'
+$ScriptVersion = '2026.05.11'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -527,7 +527,7 @@ function Get-SignatureDataSVN {
 function Get-SecureBootUEFI_SVN {
     param (
         [Parameter(Mandatory)]
-        [string]$SVN
+        [string]$SVN_GUID
     )
 
     try {
@@ -542,7 +542,7 @@ function Get-SecureBootUEFI_SVN {
         }
     }
 
-    $LatestSVN = $SignatureData -match "^$SVN" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
+    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
 
     if ($LatestSVN.Count) {
         $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
@@ -1244,10 +1244,18 @@ $ScriptBlock = {
         exit 1
     }
 
-    $null = (Get-CimInstance -ClassName Win32_BootConfiguration).Caption -match '(\d+)(.*)(\d+)'
-    $GUID = (Get-Partition -DiskNumber $Matches[1] -PartitionNumber $Matches[3]).Guid
+    $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
+    
+    if ($EFI_Device -match 'Harddisk') {
+        $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
+    }
+    else {
+        $DriveLetter = ($EFI_Device -split '=')[-1]
+        $null = (& mountvol $DriveLetter /l) -match '({.*})'
+    
+        $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
+    }
 
-    $EFI_Path = "\\?\Volume$GUID\EFI"
     $EFI_FolderPath = "$EFI_Path\Certs"
 
     $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
@@ -1465,8 +1473,10 @@ $ScriptBlock = {
             else {
                 foreach ($Volume in $RemovableDrives) {
                     $DriveLetter = $Volume.DriveLetter + ':'
-                    $EFI_BootMgr = "$DriveLetter\EFI\Microsoft\Boot\bootmgfw.efi"
-                    $EFI_BootFile = "$DriveLetter\EFI\Boot\boot${EDK2_Arch}.efi"
+                    $EFI_Path = '{0}\EFI' -f $DriveLetter
+
+                    $EFI_BootMgr = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
+                    $EFI_BootFile = "$EFI_Path\Boot\boot${EDK2_Arch}.efi"
 
                     if (-not (Test-Path $EFI_BootMgr) -and -not (Test-Path $EFI_BootFile)) {
                         continue
@@ -1478,7 +1488,7 @@ $ScriptBlock = {
                         $EFI_BootMgr_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr).Hash
 
                         if ($EFI_BootMgr_Hash -ne $BootMgrEX_File_Hash) {
-                            $BCD = "$DriveLetter\EFI\Microsoft\Boot\BCD"
+                            $BCD = "$EFI_Path\Microsoft\Boot\BCD"
                             $Backup_BCD = "$env:TEMP\BCD.BAK"
 
                             try {

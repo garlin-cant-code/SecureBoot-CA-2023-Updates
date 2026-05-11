@@ -1,4 +1,5 @@
 @echo off
+where pwsh >nul 2>nul
 if %errorlevel% equ 0 (
    pwsh -nop -ep bypass -noexit -f "%~dp0\Update_UEFI-CA2023.ps1" %*
 ) else (
