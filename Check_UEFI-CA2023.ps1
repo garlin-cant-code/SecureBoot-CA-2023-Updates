@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.08.01
+.VERSION 2026.05.11
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.08.01'
+$ScriptVersion = '2026.05.11'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -764,7 +764,7 @@ function Get-SignatureDataSVN {
 function Get-SecureBootUEFI_SVN {
     param (
         [Parameter(Mandatory)]
-        [string]$SVN
+        [string]$SVN_GUID
     )
 
     try {
@@ -779,7 +779,7 @@ function Get-SecureBootUEFI_SVN {
         }
     }
 
-    $LatestSVN = $SignatureData -match "^$SVN" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
+    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
 
     if ($LatestSVN.Count) {
         $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
@@ -1483,15 +1483,14 @@ $ScriptBlock = {
 
     $UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
-    if ($UEFI_SVN -ne $null) {
+    if ($UEFI_SVN -eq $null) {
+        '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
+    }
+    else {
         '{0}Windows BootMgr SVN {1}' -f $Tab4, $UEFI_SVN
     }
 
     if ($Verbose) {
-        if ($UEFI_SVN -eq $null) {
-            '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
-        }
-
         if ($dbx_BytesCount -ne 0) {
             '{0}EFI_CERT_SHA256_GUID Signatures: {1}' -f $Tab4, (Get-SecureBootUEFI -Name dbx | Get-UEFIDatabaseSignatures | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }).SignatureList.Count
         }
@@ -1520,10 +1519,17 @@ $ScriptBlock = {
         }
     }
 
-    $null = (Get-CimInstance -ClassName Win32_BootConfiguration).Caption -match '(\d+)(.*)(\d+)'
-    $GUID = (Get-Partition -DiskNumber $Matches[1] -PartitionNumber $Matches[3]).Guid
-
-    $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $GUID)
+    $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
+    
+    if ($EFI_Device -match 'Harddisk') {
+        $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
+    }
+    else {
+        $DriveLetter = ($EFI_Device -split '=')[-1]
+        $null = (& mountvol $DriveLetter /l) -match '({.*})'
+    
+        $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
+    }
 
     $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
     $SkuSiPolicy_File = "$UpdatesFolder\SkuSiPolicy.p7b"
@@ -1539,7 +1545,7 @@ $ScriptBlock = {
     $WindowsUEFICA2023Capable = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name WindowsUEFICA2023Capable -ErrorAction SilentlyContinue
 
     if ($WindowsUEFICA2023Capable -ne $null) {
-        '{0}Registry: WindowsUEFICA2023Capable = {1}' -f $Tab4, $WindowsUEFICA2023Capable
+        '{0}Registry: "WindowsUEFICA2023Capable" = {1}' -f $Tab4, $WindowsUEFICA2023Capable
 
         switch ($WindowsUEFICA2023Capable) {
             0  { '{0}[Windows UEFI CA 2023] not in UEFI DB.' -f $Tab8 }
@@ -1598,13 +1604,14 @@ $ScriptBlock = {
     $CheckList = Audit-UEFI
 
     if ($Audit) {
-        Print-Header -Bold "`nAUDIT REPORT"
+        if (-not $BootMedia) { '' }
+        Print-Header -Bold 'AUDIT REPORT'
 
         if ($CheckList -ne $null) {
             $CheckList.TrimEnd("`n")
         }
         else {
-            Write-Output ''
+            '{0}PASSED ALL CHECKS.' -f $Tab4
         }
     }
 
@@ -1621,7 +1628,9 @@ $ScriptBlock = {
         }
 
         Run-FiniteStateMachine
-        Print-Header -Bold "`nREQUIRED ACTION"
+
+        if (-not $BootMedia) { '' }
+        Print-Header -Bold 'REQUIRED ACTION'
 
         if (('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) -and ('Windows UEFI CA 2023' -in $db_Certs)) {
             "`nRun the command:`n{0}Update_UEFI-CA2023.ps1{1}`n" -f $Tab4, $(if ($RevokeFlags) { ' -Revoke' })
@@ -1707,11 +1716,13 @@ $ScriptBlock = {
         }
     }
     else {
+        if (-not $BootMedia) { '' }
         Print-Header 'STATUS REPORT'
+
         $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name UEFICA2023Status -ErrorAction SilentlyContinue
 
         if ($UEFICA2023Status -ne $null) {
-            "{0}Registry: UEFICA2023Status = {1}`n" -f $Tab4, $UEFICA2023Status
+            "{0}Registry: `"UEFICA2023Status`" = {1}`n" -f $Tab4, $UEFICA2023Status
         }
 
         "{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked." -f $Tab4, $Tab4
