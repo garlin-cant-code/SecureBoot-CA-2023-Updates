@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.11
+.VERSION 2026.05.14
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.11'
+$ScriptVersion = '2026.05.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -103,6 +103,11 @@ $Tab12 = ' ' * 12
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
+    exit 0
+}
+
+if ($psISE -ne $null) {
+    Write-Host 'ERROR: Script cannot be executed in PowerShell ISE.  Please use powershell.exe or pwsh.exe.' -Foreground Red
     exit 0
 }
 
@@ -203,7 +208,7 @@ function Confirm-MinimumUBR {
 function Get-HarddiskVolume {
     <#
         https://superuser.com/a/1401025
-        Author: phant0m
+        Original Author: phant0m
         Modified By: garlin (@garlin-cant-code)
     #>
 
@@ -958,8 +963,8 @@ function Audit-UEFI {
         $script:RevokeFlags = $script:RevokeFlags -bor 0x200
     }
 
-    $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
+    $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
     if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-DBXUpdateSVN) -gt $UEFI_SVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
@@ -1097,9 +1102,6 @@ function Validate-BootMgrFile
         else {
             "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File)
         }
-    }
-    else {
-        Write-Output ''
     }
 }
 
@@ -1483,11 +1485,11 @@ $ScriptBlock = {
 
     $UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
-    if ($UEFI_SVN -eq $null) {
-        '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
-    }
-    else {
+    if ($UEFI_SVN) {
         '{0}Windows BootMgr SVN {1}' -f $Tab4, $UEFI_SVN
+    }
+    elseif ($Verbose) {
+        '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
     }
 
     if ($Verbose) {
@@ -1542,9 +1544,9 @@ $ScriptBlock = {
     Print-Header 'EFI Files'
     Validate-BootMgrFile -BootMgr_File $BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
 
-    $WindowsUEFICA2023Capable = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name WindowsUEFICA2023Capable -ErrorAction SilentlyContinue
+    try {
+        $WindowsUEFICA2023Capable = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name WindowsUEFICA2023Capable
 
-    if ($WindowsUEFICA2023Capable -ne $null) {
         '{0}Registry: "WindowsUEFICA2023Capable" = {1}' -f $Tab4, $WindowsUEFICA2023Capable
 
         switch ($WindowsUEFICA2023Capable) {
@@ -1553,6 +1555,8 @@ $ScriptBlock = {
             2  { '{0}[Windows UEFI CA 2023] in UEFI DB, and Windows starting from CA 2023 Boot Manager.' -f $Tab8 }
             default { '{0}Unknown status.' -f $Tab8 }
         }
+    }
+    catch {
     }
 
     if ($VBS_Enabled) {
@@ -1711,7 +1715,7 @@ $ScriptBlock = {
             "`nOPTION 1:  {0}`n" -f $UpdateMessage
             '{0}Update_UEFI-CA2023.ps1' -f $Tab8
 
-            "`n`nOPTION 2:  {1}`n" -f $RevokeMessage
+            "`n`nOPTION 2:  {0}`n" -f $RevokeMessage
             '{0}Update_UEFI-CA2023.ps1 -Revoke' -f $Tab8
         }
     }
@@ -1719,10 +1723,11 @@ $ScriptBlock = {
         if (-not $BootMedia) { '' }
         Print-Header 'STATUS REPORT'
 
-        $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name UEFICA2023Status -ErrorAction SilentlyContinue
-
-        if ($UEFICA2023Status -ne $null) {
+        try {
+            $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name UEFICA2023Status
             "{0}Registry: `"UEFICA2023Status`" = {1}`n" -f $Tab4, $UEFICA2023Status
+        }
+        catch {
         }
 
         "{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked." -f $Tab4, $Tab4

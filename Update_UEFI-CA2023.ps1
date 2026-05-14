@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.11
+.VERSION 2026.05.14
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.11'
+$ScriptVersion = '2026.05.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -125,6 +125,11 @@ $Tab4 = ' ' * 4
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
+    exit 0
+}
+
+if ($psISE -ne $null) {
+    Write-Host 'ERROR: Script cannot be executed in PowerShell ISE.  Please use powershell.exe or pwsh.exe.' -Foreground Red
     exit 0
 }
 
