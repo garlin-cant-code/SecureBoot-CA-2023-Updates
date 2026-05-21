@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.14
+.VERSION 2026.05.21
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.14'
+$ScriptVersion = '2026.05.21'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -255,14 +255,16 @@ function Get-HarddiskVolume {
     return $null
 }
 
-function Get-ProductVersion {
+function Get-FileVersion {
     param (
         [Parameter(Mandatory)]
         [string]$File
     )
 
-    $ProductVersion = (Get-Item -LiteralPath $File).VersionInfo.ProductVersion -replace '^10.0.'
-    return $ProductVersion
+    $FileVersionRaw = (Get-Item -LiteralPath $File).VersionInfo.FileVersionRaw
+    $FileVersion = '{0}.{1}' -f $FileVersionRaw.Build, $FileVersionRaw.Revision
+
+    return $FileVersion
 }
 
 function Print-Header {
@@ -575,27 +577,31 @@ function Validate-PFXCert {
         return 'ALLOWED'
     }
 
-    switch ($CertName) {
-        { $_ -match '2011' } {
-            if ($KEK_Certs -contains 'Microsoft Corporation KEK CA 2011' -and $db_Certs -contains $CertName -and $dbx_Certs -notcontains $CertName) {
-               return 'ALLOWED'
-            }
-            else {
-               return 'BANNED'
-            }
-        }
-
-        { $_ -match '2023' } {
-            if ($KEK_Certs -contains 'Microsoft Corporation KEK 2K CA 2023' -and $db_Certs -contains $CertName -and $dbx_Certs -notcontains $CertName) {
-               return 'ALLOWED'
-            }
-            else {
-               return 'BANNED'
+    switch -Regex ($CertName) {
+        '2011' {
+            if ($KEK_Certs -contains 'Microsoft Corporation KEK CA 2011' -and $db_Certs -contains $CertName) {
+                if ($dbx_Certs -contains $CertName) {
+                    return 'BANNED'
+                }
+                else {
+                    return 'ALLOWED'
+                }
             }
         }
 
-        default { return 'UNKNOWN' }
+        '2023' {
+            if ($KEK_Certs -contains 'Microsoft Corporation KEK 2K CA 2023' -and $db_Certs -contains $CertName) {
+                if ($dbx_Certs -contains $CertName) {
+                    return 'BANNED'
+                }
+                else {
+                    return 'ALLOWED'
+                }
+            }
+        }
     }
+
+    return 'UNTRUSTED'
 }
 
 function Check-TrustedPK {
@@ -718,8 +724,8 @@ function Match-DBXSignatureData {
         else {
             $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
-            switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } {
+            switch -Regex ($RequiredSig) {
+                "^$EFI_BOOTMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -727,7 +733,7 @@ function Match-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_CDBOOT_SVN_GUID" } {
+                "^$EFI_CDBOOT_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -735,7 +741,7 @@ function Match-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_WDSMGR_SVN_GUID" } {
+                "^$EFI_WDSMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -1077,18 +1083,21 @@ function Validate-BootMgrFile
 
     $PFXCert = Get-PFXCert $BootMgr_File
 
-    if ((Validate-PFXCert $PFXCert) -eq 'BANNED') {
-        '{0}Boot File [{1}] {2} BANNED' -f $Indent, ($PFXCert -replace 'Microsoft Windows '), $Verb
-    }
-    else {
-        $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
-        $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
-
-        if ($UEFI_SVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
-            '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+    switch -Regex (Validate-PFXCert $PFXCert) {
+        'BANNED|UNTRUSTED' {
+            '{0}Boot File [{1}] {2} {3}' -f $Indent, ($PFXCert -replace 'Microsoft Windows '), $Verb, $_
         }
-        else {
-            '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+
+        'ALLOWED' {
+            $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
+            $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
+
+            if ($UEFI_SVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+                '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+            }
+            else {
+                '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+            }
         }
     }
 
@@ -1097,10 +1106,10 @@ function Validate-BootMgrFile
         $Indent += $Tab4
 
         if ($BootMgrSVN -ne $null) {
-            "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File), $BootMgrSVN
+            "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, (Get-FileVersion $BootMgr_File), $BootMgrSVN
         }
         else {
-            "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-ProductVersion $BootMgr_File)
+            "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-FileVersion $BootMgr_File)
         }
     }
 }
@@ -1120,11 +1129,11 @@ function Check-WIM_BootManager {
         '{0}{1,-13} Boot Manager [Windows UEFI CA 2023] is PRESENT.' -f $Tab8, $WIM_Image
     }
     else {
-        if ($SecureBoot -eq $false -or $dbx_Certs -notcontains 'Microsoft Windows Production PCA 2011') {
-            '{0}{1,-13} Boot Manager [Production PCA 2011] {2} ALLOWED.' -f $Tab8, $WIM_Image, $Verb
+        if ($SecureBoot -and $dbx_Certs -contains 'Microsoft Windows Production PCA 2011') {
+            '{0}{1,-13} Boot Manager [Production PCA 2011] {2} BANNED.' -f $Tab8, $WIM_Image, $Verb
         }
         else {
-            '{0}{1,-13} Boot Manager [Production PCA 2011] {2} BANNED.' -f $Tab8, $WIM_Image, $Verb
+            '{0}{1,-13} Boot Manager [Production PCA 2011] {2} ALLOWED.' -f $Tab8, $WIM_Image, $Verb
         }
     }
 }
@@ -1522,15 +1531,26 @@ $ScriptBlock = {
     }
 
     $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
-    
-    if ($EFI_Device -match 'Harddisk') {
-        $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
-    }
-    else {
-        $DriveLetter = ($EFI_Device -split '=')[-1]
-        $null = (& mountvol $DriveLetter /l) -match '({.*})'
-    
-        $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
+
+    switch -Regex ($EFI_Device) {
+        'Harddisk' {
+            $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
+        }
+
+        '[A-Z]:' {
+            $DriveLetter = ($EFI_Device -split '=')[-1]
+            $null = (& mountvol $DriveLetter /l) -match '({.*})'
+
+            $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
+        }
+
+        # Worst case fallback
+        default {
+            $SystemDisk = (Get-CimInstance -Namespace 'Root\CIMv2' -Query 'SELECT * FROM Win32_DiskPartition' | where { $_.Type -eq 'GPT: System' }).DiskIndex
+            $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
+
+            $EFI_Path = '{0}EFI' -f (Get-Volume_DevicePath $GUID)
+        }
     }
 
     $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
@@ -1736,7 +1756,7 @@ $ScriptBlock = {
 
 if ($Log) {
     $System = Get-CimInstance -ClassName Win32_ComputerSystem
-    $LogFile = '{0}\{1} {2} Check-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), $System.Model.ToUpper()
+    $LogFile = '{0}\{1} {2} Check-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
     & $ScriptBlock | Tee-Object $LogFile
     "`nLog file saved as `"{0}`"`n" -f $LogFile

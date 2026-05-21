@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.08
+.VERSION 2026.05.21
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.05.08'
+$ScriptVersion = '2026.05.21'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -554,18 +554,18 @@ function Compare-DBXSignatureData {
         if ($DBXSignatureData -contains $RequiredSig) {
             $Matched++
 
-            switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } { $SVN_SigCount++ }
-                { $_ -match "^$EFI_CDBOOT_SVN_GUID" }  { $SVN_SigCount++ }
-                { $_ -match "^$EFI_WDSMGR_SVN_GUID" }  { $SVN_SigCount++ }
+            switch -Regex ($RequiredSig) {
+                "^$EFI_BOOTMGR_SVN_GUID"  { $SVN_SigCount++ }
+                "^$EFI_CDBOOT_SVN_GUID"   { $SVN_SigCount++ }
+                "^$EFI_WDSMGR_SVN_GUID"   { $SVN_SigCount++ }
                 default { $EFI_SigCount++ }
              }
         }
         else {
             $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
-            switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } {
+            switch -Regex ($RequiredSig) {
+                "^$EFI_BOOTMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -576,7 +576,7 @@ function Compare-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_CDBOOT_SVN_GUID" } {
+                "^$EFI_CDBOOT_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -587,7 +587,7 @@ function Compare-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_WDSMGR_SVN_GUID" } {
+                "^$EFI_WDSMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -690,7 +690,7 @@ if ($Verbose) {
 }
 
 $System = Get-CimInstance -ClassName Win32_ComputerSystem
-$LogFile = '{0}\{1} {2} Check-DBXUpdate.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), $System.Model.ToUpper()
+$LogFile = '{0}\{1} {2} Check-DBXUpdate.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
 if (Test-Path $LogFile) {
     Remove-Item $LogFile -Force
