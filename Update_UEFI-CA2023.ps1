@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.14
+.VERSION 2026.05.21
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.14'
+$ScriptVersion = '2026.05.21'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -646,8 +646,8 @@ function Match-DBXSignatureData {
         else {
             $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
-            switch ($RequiredSig) {
-                { $_ -match "^$EFI_BOOTMGR_SVN_GUID" } {
+            switch -Regex ($RequiredSig) {
+                "^$EFI_BOOTMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -655,7 +655,7 @@ function Match-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_CDBOOT_SVN_GUID" } {
+                "^$EFI_CDBOOT_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -663,7 +663,7 @@ function Match-DBXSignatureData {
                     }
                 }
 
-                { $_ -match "^$EFI_WDSMGR_SVN_GUID" } {
+                "^$EFI_WDSMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
@@ -963,6 +963,10 @@ function Append-SecureBootSignedFile {
             # Incorrect authentication data: 0xC0000022
             '0xC0000022' {
                 Write-Host 'Wrong signature for this UEFI variable.' -Foreground Red
+
+                if ($SecureBoot -and $Variable -eq 'dbx') {
+                    Write-Host "Try disabling Legacy CSM support and Secure Boot, before running the script."
+                }
             }
 
             # Unexpected Result, status error: 0xC000000D
@@ -1250,14 +1254,14 @@ $ScriptBlock = {
     }
 
     $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
-    
+
     if ($EFI_Device -match 'Harddisk') {
         $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
     }
     else {
         $DriveLetter = ($EFI_Device -split '=')[-1]
         $null = (& mountvol $DriveLetter /l) -match '({.*})'
-    
+
         $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
     }
 
@@ -1490,9 +1494,9 @@ $ScriptBlock = {
                     $Label = $Volume.FileSystemLabel
 
                     if (Test-Path $EFI_BootMgr) {
-                        $EFI_BootMgr_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr).Hash
+                        $EFI_BootMgr_File_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr).Hash
 
-                        if ($EFI_BootMgr_Hash -ne $BootMgrEX_File_Hash) {
+                        if ($EFI_BootMgr_File_Hash -ne $BootMgrEX_File_Hash) {
                             $BCD = "$EFI_Path\Microsoft\Boot\BCD"
                             $Backup_BCD = "$env:TEMP\BCD.BAK"
 
@@ -1582,7 +1586,7 @@ $ScriptBlock = {
 
 if ($Log) {
     $System = Get-CimInstance -ClassName Win32_ComputerSystem
-    $LogFile = '{0}\{1} {2} Update-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), $System.Model.ToUpper()
+    $LogFile = '{0}\{1} {2} Update-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
     & $ScriptBlock | Tee-Object $LogFile
     "`nLog file saved as `"{0}`"`n" -f $LogFile
