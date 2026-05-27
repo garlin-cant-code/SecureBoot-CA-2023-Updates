@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.21
+.VERSION 2026.05.27
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.21'
+$ScriptVersion = '2026.05.27'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -578,6 +578,23 @@ function Get-DBXUpdateSVN {
     }
 
     return (Get-SignatureDataSVN $($SignatureData))
+}
+
+function Get-BootManagerSVN {
+    param (
+        [Parameter(Mandatory)]
+        [string]$BootMgr_File
+    )
+
+    # Get-SecureBootSVN is only available in W11 Feb 2026 Preview or later releases
+    try {
+        $BootMgrSVN = (Get-SecureBootSVN -BootManagerPath $BootMgr_File).BootManagerSVN
+    }
+    catch {
+        $BootMgrSVN = $null
+    }
+
+    return $BootMgrSVN
 }
 
 function Match-DBXSignatureData {
@@ -1468,7 +1485,9 @@ $ScriptBlock = {
         $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
         $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-        if ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash) {
+        $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
+
+        if (($BootMgr_File_Hash -ne $BootMgrEX_File_Hash) -and ([version]$BootMgrSVN -lt [version]$UEFI_SVN)) {
             Update-EFI_BootManager
             $UEFI_Updated = $true
         }

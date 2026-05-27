@@ -2,7 +2,7 @@ Run ".\Check_DBXUpdate.bin.ps1 -version"
     Check_DBXUpdate.bin.ps1 version (2026.05.21)
 
 Run ".\Check_UEFI-CA2023.ps1 -version"
-    Check_UEFI-CA2023.ps1 version (2026.05.21)
+    Check_UEFI-CA2023.ps1 version (2026.05.27)
 
 Run ".\Update_UEFI-CA2023.ps1 -version"
-    Update_UEFI-CA2023.ps1 version (2026.05.21)
+    Update_UEFI-CA2023.ps1 version (2026.05.2)
