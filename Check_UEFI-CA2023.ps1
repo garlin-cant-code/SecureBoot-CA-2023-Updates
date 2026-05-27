@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.21
+.VERSION 2026.05.27
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.21'
+$ScriptVersion = '2026.05.27'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1082,6 +1082,7 @@ function Validate-BootMgrFile
     )
 
     $PFXCert = Get-PFXCert $BootMgr_File
+    $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
 
     switch -Regex (Validate-PFXCert $PFXCert) {
         'BANNED|UNTRUSTED' {
@@ -1092,17 +1093,16 @@ function Validate-BootMgrFile
             $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
             $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-            if ($UEFI_SVN -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
-                '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+            if (($BootMgr_File_Hash -eq $BootMgrEX_File_Hash) -or ($UEFI_SVN -and [version]$BootMgrSVN -ge [version]$UEFI_SVN)) {
+                '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
             }
             else {
-                '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+                '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
             }
         }
     }
 
     if ($Verbose) {
-        $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
         $Indent += $Tab4
 
         if ($BootMgrSVN -ne $null) {
