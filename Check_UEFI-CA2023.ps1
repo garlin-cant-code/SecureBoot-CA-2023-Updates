@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.27
+.VERSION 2026.05.31
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.27'
+$ScriptVersion = '2026.05.31'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -107,7 +107,7 @@ if ($Version) {
 }
 
 if ($psISE -ne $null) {
-    Write-Host 'ERROR: Script cannot be executed in PowerShell ISE.  Please use powershell.exe or pwsh.exe.' -Foreground Red
+    Write-Host 'ERROR: Script cannot be executed in PowerShell ISE.  Please use powershell.exe or pwsh.exe.' -ForegroundColor Red
     exit 0
 }
 
@@ -380,7 +380,7 @@ function Get-UefiDatabaseSignatures {
     }
 
     # Modified from Split-Dbx
-    if (($Bytes[40] -eq 0x30) -and ($Bytes[41] -eq 0x82 ))
+    if (($Bytes[40] -eq 0x30) -and ($Bytes[41] -eq 0x82))
     {
         Write-Debug "Removing signature."
 
@@ -669,7 +669,7 @@ function Match-DBXSignatureData {
         Modified By: github.com/cjee21
         Modified By: garlin (@garlin-cant-code)
 
-        .PARAMETER DBXUpdateFile
+        .PARAMETER DBXUpdate_File
         Specifies a filename containing signed DBX Update signatures
 
         .OUTPUTS
@@ -683,7 +683,7 @@ function Match-DBXSignatureData {
     )
 
     if (-not (Test-Path $DBXUpdate_File)) {
-        Write-Host "DBX update file `"$DBXUpdate_File`" not found." -Foreground Red
+        Write-Host "DBX update file `"$DBXUpdate_File`" not found." -ForegroundColor Red
         exit 1
     }
 
@@ -691,7 +691,7 @@ function Match-DBXSignatureData {
         $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdate_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
     }
     catch {
-        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdate_File" -Foreground Red
+        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdate_File" -ForegroundColor Red
         return $true
     }
 
@@ -711,7 +711,7 @@ function Match-DBXSignatureData {
     $RequiredCount = $RequiredSignatureData.Count
 
     if ($RequiredCount -eq 0) {
-        Write-Host "No DBX signatures in $DBXUpdate_File" -Foreground Red
+        Write-Host "No DBX signatures in $DBXUpdate_File" -ForegroundColor Red
         return $true
     }
 
@@ -1149,7 +1149,7 @@ function Check-BootMedia {
     foreach ($Volume in $RemovableDrives) {
         $DriveLetter = $Volume.DriveLetter
 
-        $EFI_BootMgr = "${DriveLetter}:\EFI\Microsoft\Boot\bootmgfw.efi"
+        $EFI_BootMgr_File = "${DriveLetter}:\EFI\Microsoft\Boot\bootmgfw.efi"
         $EFI_BootFile = "${DriveLetter}:\EFI\Boot\boot${Arch}.efi"
         $Boot_WIM = "${DriveLetter}:\sources\boot.wim"
         $WIM_Formats = @('wim','esd','swm')
@@ -1170,8 +1170,8 @@ function Check-BootMedia {
             '{0}{1} Drive {2}:' -f $Tab4, $DriveType, $DriveLetter
         }
 
-        if (Test-Path $EFI_BootMgr) {
-            Validate-BootMgrFile -BootMgr_File $EFI_BootMgr -Label 'Windows Boot Manager' -Indent $Tab8
+        if (Test-Path $EFI_BootMgr_File) {
+            Validate-BootMgrFile -BootMgr_File $EFI_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab8
         }
         elseif (Test-Path $EFI_BootFile) {
             Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab8
@@ -1402,7 +1402,7 @@ $ScriptBlock = {
         $dbx_Certs = Get-UEFICert dbx
     }
     catch {
-        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -Foreground Red
+        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -ForegroundColor Red
         $_.Exception.Message
         exit 1
     }
@@ -1450,7 +1450,7 @@ $ScriptBlock = {
 
             default {
                 "`nERROR: Unable to parse Microsoft's KEK update map."
-                Write-Host $_ -Foreground Red
+                Write-Host $_ -ForegroundColor Red
             }
         }
     }
@@ -1539,18 +1539,29 @@ $ScriptBlock = {
 
         '[A-Z]:' {
             $DriveLetter = ($EFI_Device -split '=')[-1]
-            $null = (& mountvol $DriveLetter /l) -match '({.*})'
+            $VolumeID = (& mountvol $DriveLetter /l).TrimStart()
 
+            if ((Get-Volume -UniqueId $VolumeID).FileSystemType -ne 'FAT32') {
+                "ERROR: bcdedit {bootmgr} device $DriveLetter is not FAT32."
+                exit 1
+            }
+
+            $null = $VolumeID -match '({.*})'
             $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
         }
 
-        # Worst case fallback
+        # Worse case fallback
         default {
             $SystemDisk = (Get-CimInstance -Namespace 'Root\CIMv2' -Query 'SELECT * FROM Win32_DiskPartition' | where { $_.Type -eq 'GPT: System' }).DiskIndex
             $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
 
-            $EFI_Path = '{0}EFI' -f (Get-Volume_DevicePath $GUID)
+            $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $GUID)
         }
+    }
+
+    if (-not (Test-Path $EFI_Path)) {
+        'ERROR: EFI folder "$EFI_Path" cannot be found.'
+        exit 1
     }
 
     $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
