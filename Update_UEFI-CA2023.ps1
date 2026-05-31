@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.27
+.VERSION 2026.05.31
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -28,12 +28,12 @@
     Provide a different source folder for the Post-Signed object (.bin) files.
 
 .PARAMETER Audit
-    Perform an audit report of the UEFI variables and Windows Boot Manager version.  Identify any missing UEFI certs, and validate if current boot files are
+    Perform an audit report of the UEFI variables and Windows Boot Manager version.  Identify any missing UEFI certs, and validate if current boot file is
     allowed by enabling Secure Boot mode.
 
-    Identify all required actions to bring system into compliance for upcoming CA 2023 changes.
+    Identify all required actions to bring system into compliance for upcoming Windows CA 2023 changes.
 
-    If Secure Boot is currently disabled, audit report will simulate conditions where Secure Boot is enabled
+    If Secure Boot is currently disabled, audit report will simulate conditions where Secure Boot is enabled.
 
 .PARAMETER Revoke
     Revoke [Microsoft Windows Production PCA 2011] certificate by adding the cert to the UEFI DBX.
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.27'
+$ScriptVersion = '2026.05.31'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -129,7 +129,7 @@ if ($Version) {
 }
 
 if ($psISE -ne $null) {
-    Write-Host 'ERROR: Script cannot be executed in PowerShell ISE.  Please use powershell.exe or pwsh.exe.' -Foreground Red
+    Write-Host 'ERROR: Script cannot be executed in PowerShell ISE.  Please use powershell.exe or pwsh.exe.' -ForegroundColor Red
     exit 0
 }
 
@@ -251,6 +251,56 @@ function Suspend-Protection {
     }
 }
 
+function Get-HarddiskVolume {
+    <#
+        https://superuser.com/a/1401025
+        Original Author: phant0m
+        Modified By: garlin (@garlin-cant-code)
+    #>
+
+    param (
+        [Parameter(Mandatory)]
+        [string]$VolumeGUID
+    )
+
+    Add-Type -MemberDefinition @'
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetVolumePathNamesForVolumeNameW([MarshalAs(UnmanagedType.LPWStr)] string lpszVolumeName,
+            [MarshalAs(UnmanagedType.LPWStr)] [Out] StringBuilder lpszVolumeNamePaths, uint cchBuferLength, ref UInt32 lpcchReturnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr FindFirstVolume([Out] StringBuilder lpszVolumeName, uint cchBufferLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool FindNextVolume(IntPtr hFindVolume, [Out] StringBuilder lpszVolumeName, uint cchBufferLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern uint QueryDosDevice(string lpDeviceName, StringBuilder lpTargetPath, int ucchMax);
+'@ -Name Kernel32 -Namespace Win32 -Using System.Text
+
+    [UInt32]$Max = 65535
+
+    $VolumeName = New-Object System.Text.StringBuilder($Max, $Max)
+    $PathName = New-Object System.Text.StringBuilder($Max, $Max)
+    $MountPoint = New-Object System.Text.StringBuilder($Max, $Max)
+    [IntPtr]$VolumeHandle = [Win32.Kernel32]::FindFirstVolume($VolumeName, $Max)
+
+    do {
+        $Volume = $VolumeName.toString()
+        $ReturnLength = [Win32.Kernel32]::QueryDosDevice($Volume.Substring(4, $Volume.Length - 5), $PathName, [UInt32]$Max)
+
+        if ($ReturnLength) {
+            if ($VolumeName -match $VolumeGUID) {
+                $DevicePath = '\\.\{0}' -f ($PathName -split '\\')[-1]
+                return $DevicePath
+            }
+        }
+    } while ([Win32.Kernel32]::FindNextVolume([IntPtr] $VolumeHandle, $VolumeName, $Max))
+
+    return $null
+}
+
 function Print-Header {
     param (
         [Parameter(Mandatory=$false)]
@@ -364,7 +414,7 @@ function Get-UefiDatabaseSignatures {
     }
 
     # Modified from Split-Dbx
-    if (($Bytes[40] -eq 0x30) -and ($Bytes[41] -eq 0x82 ))
+    if (($Bytes[40] -eq 0x30) -and ($Bytes[41] -eq 0x82))
     {
         Write-Debug "Removing signature."
 
@@ -608,7 +658,7 @@ function Match-DBXSignatureData {
         Modified By: github.com/cjee21
         Modified By: garlin (@garlin-cant-code)
 
-        .PARAMETER DBXUpdateFile
+        .PARAMETER DBXUpdate_File
         Specifies a filename containing signed DBX Update signatures
 
         .OUTPUTS
@@ -622,7 +672,7 @@ function Match-DBXSignatureData {
     )
 
     if (-not (Test-Path $DBXUpdate_File)) {
-        Write-Host "DBX update file `"$DBXUpdate_File`" not found." -Foreground Red
+        Write-Host "DBX update file `"$DBXUpdate_File`" not found." -ForegroundColor Red
         exit 1
     }
 
@@ -630,7 +680,7 @@ function Match-DBXSignatureData {
         $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdate_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
     }
     catch {
-        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdate_File" -Foreground Red
+        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdate_File" -ForegroundColor Red
         return $true
     }
 
@@ -650,7 +700,7 @@ function Match-DBXSignatureData {
     $RequiredCount = $RequiredSignatureData.Count
 
     if ($RequiredCount -eq 0) {
-        Write-Host "No DBX signatures in $DBXUpdate_File" -Foreground Red
+        Write-Host "No DBX signatures in $DBXUpdate_File" -ForegroundColor Red
         return $true
     }
 
@@ -752,23 +802,23 @@ function Audit-UEFI {
     }
 
     if ('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) {
-        $CheckList += "{0,-3} [Microsoft Corporation KEK 2K CA 2023] missing from UEFI KEK`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} [Microsoft Corporation KEK 2K CA 2023] is missing from UEFI KEK`n" -f ('{0}.' -f $index++)
     }
 
     if ('Windows UEFI CA 2023' -notin $db_Certs) {
-        $CheckList += "{0,-3} [Windows UEFI CA 2023] missing from UEFI DB (dbupdate2024.bin)`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} [Windows UEFI CA 2023] is missing from UEFI DB (dbupdate2024.bin)`n" -f ('{0}.' -f $index++)
     }
 
     if ('Microsoft UEFI CA 2023' -notin $db_Certs) {
-        $CheckList += "{0,-3} [Microsoft UEFI CA 2023] missing from UEFI DB (DBUpdate3P2023.bin)`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} [Microsoft UEFI CA 2023] is missing from UEFI DB (DBUpdate3P2023.bin)`n" -f ('{0}.' -f $index++)
     }
 
     if ('Microsoft Option ROM UEFI CA 2023' -notin $db_Certs) {
-        $CheckList += "{0,-3} [Microsoft Option ROM UEFI CA 2023] missing from UEFI DB (DBUpdateOROM2023.bin)`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} [Microsoft Option ROM UEFI CA 2023] is missing from UEFI DB (DBUpdateOROM2023.bin)`n" -f ('{0}.' -f $index++)
     }
 
     if ('Microsoft Windows Production PCA 2011' -notin $dbx_Certs) {
-        $CheckList += "{0,-3} [Production PCA 2011] missing from UEFI DBX (DBXUpdate2024.bin)`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} [Production PCA 2011] is missing from UEFI DBX (DBXUpdate2024.bin)`n" -f ('{0}.' -f $index++)
     }
 
     if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$UpdatesFolder\dbxupdate.bin")) {
@@ -862,10 +912,10 @@ function Set-SecureBootSignedFile {
     }
     catch {
         $ErrorMessage = 'ERROR: Failed to write "{0}" to UEFI {1}.' -f (Split-Path $Filename -Leaf), $Variable.ToUpper()
-        Write-Host $ErrorMessage -Foreground Red
+        Write-Host $ErrorMessage -ForegroundColor Red
 
         if ($_.Exception.Message -match '0xC0000022') {
-            Write-Host 'Wrong signature for this UEFI variable.' -Foreground Red
+            Write-Host 'Wrong signature for this UEFI variable.' -ForegroundColor Red
         }
         else {
             $_.Exception.Message
@@ -919,14 +969,14 @@ function Append-SecureBootSignedFile {
     }
 
     if ($PSVersion -gt 5) {
-        $Bytes = Get-Content -AsByteStream $Filename
+        $Bytes = Get-Content -AsByteStream $Filename -ErrorAction Stop
     }
     else {
-        $Bytes = Get-Content -Encoding Byte $Filename
+        $Bytes = Get-Content -Encoding Byte $Filename -ErrorAction Stop
     }
 
     # Identify file signature
-    if (($Bytes[40] -ne 0x30) -or ($Bytes[41] -ne 0x82 )) {
+    if (($Bytes[40] -ne 0x30) -or ($Bytes[41] -ne 0x82)) {
         Write-Error "Cannot find signature!" -ErrorAction Stop
     }
 
@@ -974,12 +1024,12 @@ function Append-SecureBootSignedFile {
     }
     catch {
         $ErrorMessage = 'ERROR: Failed to append "{0}.bin" to UEFI {1}.' -f $CertName, $Variable.ToUpper()
-        Write-Host $ErrorMessage -Foreground Red
+        Write-Host $ErrorMessage -ForegroundColor Red
 
         switch -Regex ($_.Exception.Message) {
             # Incorrect authentication data: 0xC0000022
             '0xC0000022' {
-                Write-Host 'Wrong signature for this UEFI variable.' -Foreground Red
+                Write-Host 'Wrong signature for this UEFI variable.' -ForegroundColor Red
 
                 if ($SecureBoot -and $Variable -eq 'dbx') {
                     Write-Host "Try disabling Legacy CSM support and Secure Boot, before running the script."
@@ -989,10 +1039,10 @@ function Append-SecureBootSignedFile {
             # Unexpected Result, status error: 0xC000000D
             '0xC000000D' {
                 if ($Variable -eq 'KEK') {
-                    Write-Host "UEFI doesn't allow appending to KEK variable.  Please try Setup Mode." -Foreground Red
+                    Write-Host "UEFI doesn't allow appending to KEK variable.  Please try Setup Mode." -ForegroundColor Red
                 }
                 else {
-                    Write-Host $_.Exception.Message -Foreground Red
+                    Write-Host $_.Exception.Message -ForegroundColor Red
                 }
             }
 
@@ -1046,7 +1096,7 @@ function Update-KEK_Cert {
     }
     catch {
         "`nERROR: Unable to parse Microsoft's KEK update map."
-        Write-Host (($_.Exception.Message -split "`n") | select -First 1) -Foreground Red
+        Write-Host (($_.Exception.Message -split "`n") | select -First 1) -ForegroundColor Red
         exit 1
     }
 
@@ -1077,7 +1127,7 @@ function Update-KEK_Cert {
             Invoke-WebRequest -UseBasicParsing -Uri $KEK_BIN_URL -OutFile $PostSignedObj_File
         }
         catch {
-            Write-Host $_.Exception.Message -Foreground Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
             exit 1
         }
 
@@ -1097,7 +1147,7 @@ function Update-KEK_Cert {
                 Invoke-WebRequest -UseBasicParsing -Uri $KEK_DER_URL -OutFile $PreSignedObj_File
             }
             catch {
-                Write-Host $_.Exception.Message -Foreground Red
+                Write-Host $_.Exception.Message -ForegroundColor Red
                 exit 1
             }
 
@@ -1245,7 +1295,7 @@ $ScriptBlock = {
 
     if (($SetupMode_Bytes -join '') -eq 1) {
         if ($WindowsHello) {
-            Write-Host "WARNING: Disable Windows Hello PIN before running script in Setup Mode." -Foreground Red
+            Write-Host "WARNING: Disable Windows Hello PIN before running script in Setup Mode." -ForegroundColor Red
             exit 1
         }
 
@@ -1259,7 +1309,7 @@ $ScriptBlock = {
         $dbx_Certs = Get-UEFICert dbx
     }
     catch {
-        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -Foreground Red
+        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -ForegroundColor Red
         exit 1
     }
 
@@ -1272,14 +1322,36 @@ $ScriptBlock = {
 
     $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
 
-    if ($EFI_Device -match 'Harddisk') {
-        $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
-    }
-    else {
-        $DriveLetter = ($EFI_Device -split '=')[-1]
-        $null = (& mountvol $DriveLetter /l) -match '({.*})'
+    switch -Regex ($EFI_Device) {
+        'Harddisk' {
+            $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
+        }
 
-        $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
+        '[A-Z]:' {
+            $DriveLetter = ($EFI_Device -split '=')[-1]
+            $VolumeID = (& mountvol $DriveLetter /l).TrimStart()
+
+            if ((Get-Volume -UniqueId $VolumeID).FileSystemType -ne 'FAT32') {
+                "ERROR: bcdedit {bootmgr} device $DriveLetter is not FAT32."
+                exit 1
+            }
+
+            $null = $VolumeID -match '({.*})'
+            $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
+        }
+
+        # Worse case fallback
+        default {
+            $SystemDisk = (Get-CimInstance -Namespace 'Root\CIMv2' -Query 'SELECT * FROM Win32_DiskPartition' | where { $_.Type -eq 'GPT: System' }).DiskIndex
+            $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
+
+            $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $GUID)
+        }
+    }
+
+    if (-not (Test-Path $EFI_Path)) {
+        'ERROR: EFI folder "$EFI_Path" cannot be found.'
+        exit 1
     }
 
     $EFI_FolderPath = "$EFI_Path\Certs"
@@ -1332,7 +1404,7 @@ $ScriptBlock = {
             $dbx_Certs = Get-UEFICert dbx
         }
         catch {
-            Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -Foreground Red
+            Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -ForegroundColor Red
             exit 1
         }
 
@@ -1503,19 +1575,19 @@ $ScriptBlock = {
                     $DriveLetter = $Volume.DriveLetter + ':'
                     $EFI_Path = '{0}\EFI' -f $DriveLetter
 
-                    $EFI_BootMgr = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
+                    $EFI_BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
                     $EFI_BootFile = "$EFI_Path\Boot\boot${EDK2_Arch}.efi"
 
-                    if (-not (Test-Path $EFI_BootMgr) -and -not (Test-Path $EFI_BootFile)) {
+                    if (-not (Test-Path $EFI_BootMgr_File) -and -not (Test-Path $EFI_BootFile)) {
                         continue
                     }
 
                     $Label = $Volume.FileSystemLabel
 
-                    if (Test-Path $EFI_BootMgr) {
-                        $EFI_BootMgr_File_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr).Hash
+                    if (Test-Path $EFI_BootMgr_File) {
+                        $EFI_BootMgr_File_File_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr_File).Hash
 
-                        if ($EFI_BootMgr_File_Hash -ne $BootMgrEX_File_Hash) {
+                        if ($EFI_BootMgr_File_File_Hash -ne $BootMgrEX_File_Hash) {
                             $BCD = "$EFI_Path\Microsoft\Boot\BCD"
                             $Backup_BCD = "$env:TEMP\BCD.BAK"
 

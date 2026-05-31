@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.21
+.VERSION 2026.05.31
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.05.21'
+$ScriptVersion = '2026.05.31'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -359,7 +359,7 @@ function Get-UefiDatabaseSignatures {
     }
 
     # Modified from Split-Dbx
-    if (($Bytes[40] -eq 0x30) -and ($Bytes[41] -eq 0x82 ))
+    if (($Bytes[40] -eq 0x30) -and ($Bytes[41] -eq 0x82))
     {
         Write-Debug "Removing signature."
 
@@ -517,7 +517,7 @@ function Compare-DBXSignatureData {
         [bool]$ShowPath = $false
     )
 
-    $DBXUpdateFile = $InputObject.FullPath
+    $DBXUpdate_File = $InputObject.FullPath
 
     if ($ShowPath) {
         $Filename = '"{0}"' -f (Split-Path $InputObject.FullPath -Leaf)
@@ -526,15 +526,15 @@ function Compare-DBXSignatureData {
         $Filename = '"{0}"' -f $InputObject.RelativePath
     }
 
-    if (-not (Test-Path $DBXUpdateFile)) {
-        Write-Host "DBX update file `"$DBXUpdateFile`" not found." -Foreground Red
+    if (-not (Test-Path $DBXUpdate_File)) {
+        Write-Host "DBX update file `"$DBXUpdate_File`" not found." -ForegroundColor Red
     }
 
     try {
-        $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdateFile)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
+        $RequiredSignatures = Get-UEFIDatabaseSignatures -BytesIn ([IO.File]::ReadAllBytes($DBXUpdate_File)) | where { $_.SignatureType -eq 'EFI_CERT_SHA256_GUID' }
     }
     catch {
-        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdateFile" -Foreground Red
+        Write-Host "No EFI_CERT_SHA256 signatures in $DBXUpdate_File" -ForegroundColor Red
         return $null
     }
 
@@ -542,7 +542,7 @@ function Compare-DBXSignatureData {
     $RequiredCount = $RequiredSignatureData.Count
 
     if ($RequiredCount -eq 0) {
-        Write-Host "No DBX signatures in $DBXUpdateFile" -Foreground Red
+        Write-Host "No DBX signatures in $DBXUpdate_File" -ForegroundColor Red
         return $null
     }
 
@@ -716,7 +716,7 @@ try {
 catch {
     if ($_.Exception.Message -match '0xC0000100') {
         $Result = "UEFI DBX variable is currently empty.`n"
-        Write-Host $Result -Foreground Red
+        Write-Host $Result -ForegroundColor Red
 
         if ($Log) {
             $Result | Add-Content $LogFile
