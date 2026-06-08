@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.31
+.VERSION 2026.06.08
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.31'
+$ScriptVersion = '2026.06.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -610,7 +610,7 @@ function Check-TrustedPK {
     }
     catch {
         if ($_.Exception.Message -match '0xC0000100') {
-            return $false
+            return $null
         }
         else {
             throw $_.Exception.Message
@@ -618,7 +618,7 @@ function Check-TrustedPK {
     }
 
     if ($PKSignatureList -eq $null) {
-        return $false
+        return $null
     }
 
     if ($PKSignatureList.SignatureData.Subject -notmatch 'DO NOT |Example') {
@@ -722,11 +722,10 @@ function Match-DBXSignatureData {
             $Matched++
         }
         else {
-            $RequiredSVN = Get-SignatureDataSVN $RequiredSig
-
             switch -Regex ($RequiredSig) {
                 "^$EFI_BOOTMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
+                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -735,6 +734,7 @@ function Match-DBXSignatureData {
 
                 "^$EFI_CDBOOT_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
+                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -743,6 +743,7 @@ function Match-DBXSignatureData {
 
                 "^$EFI_WDSMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
+                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -767,7 +768,7 @@ function Get-SignatureDataSVN {
     )
 
     # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
-    $SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
+    [version]$SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
 
     return $SVN
 }
@@ -790,10 +791,10 @@ function Get-SecureBootUEFI_SVN {
         }
     }
 
-    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
+    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { (Get-SignatureDataSVN $_) } | sort | select -Last 1
 
     if ($LatestSVN.Count) {
-        $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
+        [version]$SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
     }
     else {
         $SVN = $null
@@ -814,13 +815,15 @@ function Get-DBXUpdateSVN {
     }
 
     $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_SVN_GUID"
-    $Count = $SignatureData.Count
 
-    if ($Count -eq 0) {
-        return $null
+    if ($SignatureData.Count) {
+        [version]$SVN = (Get-SignatureDataSVN $($SignatureData))
+    }
+    else {
+        $SVN = $null
     }
 
-    return (Get-SignatureDataSVN $($SignatureData))
+    return $SVN
 }
 
 function Get-BootManagerSVN {
@@ -831,7 +834,7 @@ function Get-BootManagerSVN {
 
     # Get-SecureBootSVN is only available in W11 Feb 2026 Preview or later releases
     try {
-        $BootMgrSVN = (Get-SecureBootSVN -BootManagerPath $BootMgr_File).BootManagerSVN
+        [version]$BootMgrSVN = (Get-SecureBootSVN -BootManagerPath $BootMgr_File).BootManagerSVN
     }
     catch {
         $BootMgrSVN = $null
@@ -884,7 +887,12 @@ function Get-UEFI_CredentialGuard {
 }
 
 function Get-SbatLevel {
-    $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction SilentlyContinue)
+    try {
+        $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction Stop)
+    }
+    catch {
+        $SbatLevel_Bytes = $null
+    }
 
     if ($SbatLevel_Bytes.Count) {
         $SbatLevel = [System.Text.Encoding]::ASCII.GetString($SbatLevel_Bytes) -replace ' ' -replace "`0"
@@ -972,7 +980,7 @@ function Audit-UEFI {
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
     $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-DBXUpdateSVN) -gt $UEFI_SVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or (($BootMgrSVN -eq $UEFI_SVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash))) {
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
         $script:UpdateFlags = $script:UpdateFlags -bor 0x100
     }
@@ -1090,10 +1098,7 @@ function Validate-BootMgrFile
         }
 
         'ALLOWED' {
-            $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
-            $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
-
-            if (($BootMgr_File_Hash -eq $BootMgrEX_File_Hash) -or ($UEFI_SVN -and [version]$BootMgrSVN -ge [version]$UEFI_SVN)) {
+            if (-not $SecureBoot -or $BootMgrSVN -ge $UEFI_SVN) {
                 '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
             }
             else {
@@ -1111,6 +1116,9 @@ function Validate-BootMgrFile
         else {
             "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-FileVersion $BootMgr_File)
         }
+    }
+    else {
+        Write-Output ''
     }
 }
 
@@ -1259,29 +1267,21 @@ $ScriptBlock = {
         $Verb = 'is'
     }
     catch {
-        "ERROR: Cannot read Secure Boot status.`n"
+        "ERROR: BIOS running in Legacy CSM mode.  Please enable UEFI mode.`n"
         exit 1
     }
 
-    switch ($SecureBoot) {
-        $true {
-            'Secure Boot: ON'
+    if ($SecureBoot) {
+        'Secure Boot: ON'
+    }
+    else {
+        if ($Audit) {
+            'Secure Boot: OFF (Audit Report runs as ON)'
+            $SecureBoot = $true
+            $Verb = 'will be'
         }
-
-        $false {
-            if ($Audit) {
-                'Secure Boot: OFF (Audit Report runs as ON)'
-                $SecureBoot = $true
-                $Verb = 'will be'
-            }
-            else {
-                'Secure Boot: OFF'
-            }
-        }
-
-        default {
-            "ERROR: This PC doesn't support Secure Boot.`n"
-            exit 1
+        else {
+            'Secure Boot: OFF'
         }
     }
 
@@ -1571,12 +1571,13 @@ $ScriptBlock = {
     $EFI_SkuSiPolicy_File = "$EFI_Path\Microsoft\Boot\SkuSiPolicy.p7b"
 
     $PFXCert = Get-PFXCert $BootMgr_File
+    $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
 
     Print-Header 'EFI Files'
     Validate-BootMgrFile -BootMgr_File $BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
 
     try {
-        $WindowsUEFICA2023Capable = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name WindowsUEFICA2023Capable
+        $WindowsUEFICA2023Capable = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'WindowsUEFICA2023Capable'
 
         '{0}Registry: "WindowsUEFICA2023Capable" = {1}' -f $Tab4, $WindowsUEFICA2023Capable
 
@@ -1755,7 +1756,7 @@ $ScriptBlock = {
         Print-Header 'STATUS REPORT'
 
         try {
-            $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name UEFICA2023Status
+            $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'UEFICA2023Status'
             "{0}Registry: `"UEFICA2023Status`" = {1}`n" -f $Tab4, $UEFICA2023Status
         }
         catch {
