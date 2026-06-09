@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.31
+.VERSION 2026.06.08
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.05.31'
+$ScriptVersion = '2026.06.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -546,13 +546,35 @@ function Get-UEFICert {
     return $Certs
 }
 
+function Get-PFXCert {
+    param (
+        [Parameter(Mandatory)]
+        [string]$FileName
+    )
+
+    try {
+        $Issuer = (Get-PfxCertificate -LiteralPath $FileName).Issuer
+    }
+    catch {
+        $_.Exception.Message
+        exit 1
+    }
+
+    if ($Issuer -match $CN_Regex) {
+        return $Matches[2]
+    }
+    else {
+        return $Issuer
+    }
+}
+
 function Check-TrustedPK {
     try {
         $PKSignatureList = (Get-SecureBootUEFI PK | Get-UefiDatabaseSignatures).SignatureList
     }
     catch {
         if ($_.Exception.Message -match '0xC0000100') {
-            return $false
+            return $null
         }
         else {
             throw $_.Exception.Message
@@ -574,7 +596,7 @@ function Get-SignatureDataSVN {
     )
 
     # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
-    $SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
+    [version]$SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
 
     return $SVN
 }
@@ -597,10 +619,10 @@ function Get-SecureBootUEFI_SVN {
         }
     }
 
-    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
+    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { (Get-SignatureDataSVN $_) } | sort | select -Last 1
 
     if ($LatestSVN.Count) {
-        $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
+        [version]$SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
     }
     else {
         $SVN = $null
@@ -621,13 +643,15 @@ function Get-DBXUpdateSVN {
     }
 
     $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_SVN_GUID"
-    $Count = $SignatureData.Count
 
-    if ($Count -eq 0) {
-        return $null
+    if ($SignatureData.Count) {
+        [version]$SVN = (Get-SignatureDataSVN $($SignatureData))
+    }
+    else {
+        $SVN = $null
     }
 
-    return (Get-SignatureDataSVN $($SignatureData))
+    return $SVN
 }
 
 function Get-BootManagerSVN {
@@ -638,7 +662,7 @@ function Get-BootManagerSVN {
 
     # Get-SecureBootSVN is only available in W11 Feb 2026 Preview or later releases
     try {
-        $BootMgrSVN = (Get-SecureBootSVN -BootManagerPath $BootMgr_File).BootManagerSVN
+        [version]$BootMgrSVN = (Get-SecureBootSVN -BootManagerPath $BootMgr_File).BootManagerSVN
     }
     catch {
         $BootMgrSVN = $null
@@ -711,11 +735,10 @@ function Match-DBXSignatureData {
             $Matched++
         }
         else {
-            $RequiredSVN = Get-SignatureDataSVN $RequiredSig
-
             switch -Regex ($RequiredSig) {
                 "^$EFI_BOOTMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
+                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -724,6 +747,7 @@ function Match-DBXSignatureData {
 
                 "^$EFI_CDBOOT_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
+                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -732,6 +756,7 @@ function Match-DBXSignatureData {
 
                 "^$EFI_WDSMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
+                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $Matched++
@@ -769,7 +794,12 @@ function Get-SkuSiPolicyVersion {
 }
 
 function Get-SbatLevel {
-    $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction SilentlyContinue)
+    try {
+        $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction Stop)
+    }
+    catch {
+        $SbatLevel_Bytes = $null
+    }
 
     if ($SbatLevel_Bytes.Count) {
         $SbatLevel = [System.Text.Encoding]::ASCII.GetString($SbatLevel_Bytes) -replace ' ' -replace "`0"
@@ -825,7 +855,7 @@ function Audit-UEFI {
         $CheckList += "{0,-3} DBX Updates are missing from UEFI DBX (dbxupdate.bin)`n" -f ('{0}.' -f $index++)
     }
 
-    $UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
+    $global:UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
     if ($UEFI_SVN -eq $null) {
         $CheckList += "{0,-3} Windows BootMgr SVN is missing from UEFI DBX (DBXUpdateSVN.bin)`n" -f ('{0}.' -f $index++)
@@ -834,13 +864,10 @@ function Audit-UEFI {
         $CheckList += "{0,-3} SecureBootUpdates SVN is higher than UEFI DBX`n" -f ('{0}.' -f $index++)
     }
 
-    $null = (Get-PfxCertificate -LiteralPath $BootMgr_File).Issuer -match $CN_Regex
-    $PFXCert = $Matches[2]
-
-    $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
+    $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ((Get-DBXUpdateSVN) -gt $UEFI_SVN) -and ($BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
+    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) 
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
     }
 
@@ -1217,7 +1244,7 @@ function Update-EFI_BootManager {
             exit 1
         }
 
-        $null = New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name Enable_WinRE -Value 'conhost --headless C:\Windows\System32\reagentc.exe /enable' -Force
+        $null = New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'Enable_WinRE' -Value 'conhost --headless C:\Windows\System32\reagentc.exe /enable' -Force
     }
 }
 
@@ -1240,12 +1267,7 @@ $ScriptBlock = {
         $SecureBoot = Confirm-SecureBootUEFI
     }
     catch {
-        "ERROR: Cannot read Secure Boot status.`n"
-        exit 1
-    }
-
-    if ($SecureBoot -isnot [bool]) {
-        "ERROR: This PC doesn't support Secure Boot.`n"
+        "ERROR: BIOS running in Legacy CSM mode.  Please enable UEFI mode.`n"
         exit 1
     }
 
@@ -1361,6 +1383,9 @@ $ScriptBlock = {
 
     $BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
     $EFI_SkuSiPolicy_File = "$EFI_Path\Microsoft\Boot\SkuSiPolicy.p7b"
+
+    $PFXCert = Get-PFXCert $BootMgr_File
+    $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
 
     $CheckList = Audit-UEFI
 
@@ -1543,7 +1568,7 @@ $ScriptBlock = {
     }
 
     if ($AvailableUpdates -gt 0) {
-        $null = Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name AvailableUpdates -Value $AvailableUpdates
+        $null = Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name 'AvailableUpdates' -Value $AvailableUpdates
         Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
     }
 
@@ -1551,15 +1576,11 @@ $ScriptBlock = {
         Remove-Item $DBXUpdate_bin,$DBXUpdateSVN_bin -Force
     }
 
-    $BootMgrEX_File = "$env:SystemRoot\Boot\EFI_EX\bootmgfw_EX.efi"
-
     if ('Windows UEFI CA 2023' -in (Get-UEFICert db)) {
         $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
         $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-        $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
-
-        if (($BootMgr_File_Hash -ne $BootMgrEX_File_Hash) -and ([version]$BootMgrSVN -lt [version]$UEFI_SVN)) {
+        if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) 
             Update-EFI_BootManager
             $UEFI_Updated = $true
         }
