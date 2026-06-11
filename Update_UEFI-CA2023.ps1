@@ -867,7 +867,7 @@ function Audit-UEFI {
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
     $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) 
+    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
     }
 
@@ -1580,7 +1580,7 @@ $ScriptBlock = {
         $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
         $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-        if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) 
+        if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
             Update-EFI_BootManager
             $UEFI_Updated = $true
         }
