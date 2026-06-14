@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.06.08
+.VERSION 2026.06.14
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.06.08'
+$ScriptVersion = '2026.06.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -608,7 +608,7 @@ function Get-SecureBootUEFI_SVN {
     )
 
     try {
-        $SignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+        $Signatures = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures)
     }
     catch {
         if ($_.Exception.Message -match '0xC0000100') {
@@ -619,9 +619,10 @@ function Get-SecureBootUEFI_SVN {
         }
     }
 
-    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { (Get-SignatureDataSVN $_) } | sort | select -Last 1
+    $SignatureData = $Signatures.SignatureList.SignatureData -match "^$SVN_GUID"
 
-    if ($LatestSVN.Count) {
+    if ($SignatureData) {
+        $LatestSVN = $SignatureData | foreach { Get-SignatureDataSVN $_ } | sort | select -Last 1
         [version]$SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
     }
     else {
@@ -644,8 +645,8 @@ function Get-DBXUpdateSVN {
 
     $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_SVN_GUID"
 
-    if ($SignatureData.Count) {
-        [version]$SVN = (Get-SignatureDataSVN $($SignatureData))
+    if ($SignatureData) {
+        [version]$SVN = Get-SignatureDataSVN $($SignatureData)
     }
     else {
         $SVN = $null
@@ -867,7 +868,7 @@ function Audit-UEFI {
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
     $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) 
+    if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
         $CheckList += "{0,-3} Windows Boot Manager [{1}] is wrong version`n" -f ('{0}.' -f $index++), ($PFXCert -replace 'Microsoft Windows ')
     }
 
@@ -1184,6 +1185,7 @@ function Update-KEK_Cert {
 
             'Copying "{0}" to EFI.' -f $CertFile
             Copy-Item -Path $PreSignedObj_File -Destination $EFI_FolderPath -Force
+            Copy-Item -Path $PreSignedObj_File -Destination "$EFI_FolderPath\$($CertFile -replace '\.der','.cer')" -Force
             Copy-Item -Path $PreSignedObj_File -Destination "$EFI_FolderPath\$($CertFile -replace '\.der','.crt')" -Force
 
             Remove-Item $PreSignedObj_File -Force
@@ -1456,7 +1458,7 @@ $ScriptBlock = {
         Append-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\DBUpdateOROM2023.bin"
     }
 
-    if ($Revoke) {
+    if ($Revoke -or ('Microsoft Windows Production PCA 2011' -in $dbx_Certs)) {
         if ($SecureBoot -and ('Microsoft Corporation KEK 2K CA 2023' -notin (Get-UEFICert KEK))) {
             'WARNING: Disable Secure Boot, before attempting to use -Revoke option.  No [KEK 2K CA 2023] cert is currently enrolled.'
             '{0}System will fail to boot due to a security violation.' -f $Tab4
@@ -1522,7 +1524,7 @@ $ScriptBlock = {
 
     $AvailableUpdates = 0
 
-    if ($SkuSiPolicy) {
+    if ($SkuSiPolicy -or (Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
         $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity' -ErrorAction SilentlyContinue
 
         if ($CodeIntegrity -eq 1) {
@@ -1580,7 +1582,7 @@ $ScriptBlock = {
         $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
         $BootMgr_File_Hash = (Get-FileHash -LiteralPath $BootMgr_File).Hash
 
-        if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) 
+        if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
             Update-EFI_BootManager
             $UEFI_Updated = $true
         }

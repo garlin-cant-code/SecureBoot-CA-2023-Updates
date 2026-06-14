@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.06.08
+.VERSION 2026.06.14
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.06.08'
+$ScriptVersion = '2026.06.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -767,8 +767,13 @@ function Get-SignatureDataSVN {
         [string]$SignatureData
     )
 
-    # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
-    [version]$SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
+    if ($SignatureData) {
+        # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
+        [version]$SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
+    }
+    else {
+        $SVN = $null
+    }
 
     return $SVN
 }
@@ -780,7 +785,7 @@ function Get-SecureBootUEFI_SVN {
     )
 
     try {
-        $SignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+        $Signatures = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures)
     }
     catch {
         if ($_.Exception.Message -match '0xC0000100') {
@@ -791,9 +796,10 @@ function Get-SecureBootUEFI_SVN {
         }
     }
 
-    $LatestSVN = $SignatureData -match "^$SVN_GUID" | foreach { (Get-SignatureDataSVN $_) } | sort | select -Last 1
+    $SignatureData = $Signatures.SignatureList.SignatureData -match "^$SVN_GUID"
 
-    if ($LatestSVN.Count) {
+    if ($SignatureData) {
+        $LatestSVN = $SignatureData | foreach { Get-SignatureDataSVN $_ } | sort | select -Last 1
         [version]$SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
     }
     else {
@@ -816,8 +822,8 @@ function Get-DBXUpdateSVN {
 
     $SignatureData = $Signatures.SignatureList.SignatureData -match "^$EFI_BOOTMGR_SVN_GUID"
 
-    if ($SignatureData.Count) {
-        [version]$SVN = (Get-SignatureDataSVN $($SignatureData))
+    if ($SignatureData) {
+        [version]$SVN = Get-SignatureDataSVN $($SignatureData)
     }
     else {
         $SVN = $null
