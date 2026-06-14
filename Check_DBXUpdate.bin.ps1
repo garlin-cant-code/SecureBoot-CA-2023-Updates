@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.05.31
+$VERSION 2026.06.14
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.05.31'
+$ScriptVersion = '2026.06.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -609,6 +609,9 @@ function Compare-DBXSignatureData {
 
                             $Columns = ('{0} {1} {2}' -f $MissingSig.filename, $MissingSig.companyName, $MissingSig.dateOfAddition) -replace '  '
                             $MissingSigList += "{0}Missing [{1}] {2}`n" -f $Tab4, $MissingSig.authenticodeHash, $Columns
+                        }
+                        else {
+                            $MissingSigList += "{0}Missing [{1}]`n" -f $Tab4, $RequiredSig
                         }
                     }
 
