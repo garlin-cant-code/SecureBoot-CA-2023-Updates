@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.06.14
+.VERSION 2026.06.24
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.06.14'
+$ScriptVersion = '2026.06.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -140,20 +140,20 @@ function Confirm-MinimumUBR {
 
     switch ($Build) {
         14393 {
-            if ($UBR -lt 9060) {
-                return "Update Windows $Release to KB5082198 (Apr 2026) or later"
+            if ($UBR -lt 9234) {
+                return "Update Windows $Release to KB5094122 (Jun 2026) or later"
             }
         }
 
         17763 {
-            if ($UBR -lt 8644) {
-                return "Update Windows $Release to KB5082123 (Apr 2026) or later"
+            if ($UBR -lt 8880) {
+                return "Update Windows $Release to KB5094123 (Jun 2026) or later"
             }
         }
 
         { $_ -in 19044,19045 } {
-            if ($UBR -lt 7184) {
-                return "Update W10 $Release to KB5082200 (Apr 2026) or later"
+            if ($UBR -lt 7417) {
+                return "Update W10 $Release to KB5094127 (Jun 2026) or later"
             }
         }
 
@@ -169,9 +169,15 @@ function Confirm-MinimumUBR {
             }
         }
 
-        { $_ -in 22621,22631 } {
-            if ($UBR -lt 6936) {
-                return "Update W11 $Release to KB5082052 (Apr 2026) or later"
+        22621 {
+            if ($UBR -lt 6060) {
+                return "Update W11 $Release to KB5066793 (Oct 2025) or later"
+            }
+        }
+
+        22631 {
+            if ($UBR -lt 7219) {
+                return "Update W11 $Release to KB5093998 (Jun 2026) or later"
             }
         }
 
@@ -182,14 +188,14 @@ function Confirm-MinimumUBR {
         }
 
         { $_ -in 26100,26200 } {
-            if ($UBR -lt 8246) {
-                return "Update W11 $Release to KB5083769 (Apr 2026) or later"
+            if ($UBR -lt 8655) {
+                return "Update W11 $Release to KB5094126 (Jun 2026) or later"
             }
         }
 
         28000 {
-            if ($UBR -lt 1836) {
-                return "Update W11 26H1 to KB5083768 (Apr 2026) or later"
+            if ($UBR -lt 2269) {
+                return "Update W11 26H1 to KB5095051 (Jun 2026) or later"
             }
         }
 
@@ -604,7 +610,7 @@ function Validate-PFXCert {
     return 'UNTRUSTED'
 }
 
-function Check-TrustedPK {
+function Check-UntrustedPK {
     try {
         $PKSignatureList = (Get-SecureBootUEFI PK | Get-UefiDatabaseSignatures).SignatureList
     }
@@ -621,7 +627,7 @@ function Check-TrustedPK {
         return $null
     }
 
-    if ($PKSignatureList.SignatureData.Subject -notmatch 'DO NOT |Example') {
+    if ($PKSignatureList.SignatureData.Subject -match 'DO NOT |Example') {
         return $true
     }
     else {
@@ -938,7 +944,7 @@ function Audit-UEFI {
         }
     }
 
-    if ($PK_Cert.Count -and -not $PK_Trusted) {
+    if ($PK_Untrusted) {
         $CheckList += "{0,-3} [{1}] is UNTRUSTED`n" -f ('{0}.' -f $index++), $PK_Cert
     }
 
@@ -1114,13 +1120,19 @@ function Validate-BootMgrFile
     }
 
     if ($Verbose) {
+        $Version = Get-FileVersion $BootMgr_File
         $Indent += $Tab4
 
-        if ($BootMgrSVN -ne $null) {
-            "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, (Get-FileVersion $BootMgr_File), $BootMgrSVN
+        if ($Version -ne '0.0') {
+            if ($BootMgrSVN -ne $null) {
+                "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, $Version, $BootMgrSVN
+            }
+            else {
+                "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, $Version
+            }
         }
         else {
-            "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, (Get-FileVersion $BootMgr_File)
+            "{0}{1}`n{2}[THIRD-PARTY] EFI File`n" -f $Indent, $BootMgr_File, $Indent
         }
     }
     else {
@@ -1413,16 +1425,16 @@ $ScriptBlock = {
         exit 1
     }
 
-    $PK_Trusted = Check-TrustedPK
+    $PK_Untrusted = Check-UntrustedPK
 
     if ($Verbose) {
         Print-UEFICerts -Name 'Default PK' -CertArray ([ref]$PKDefault_Cert)
     }
 
-    if ((-not $SetupMode -and -not $PK_Trusted) -or $Verbose) {
+    if ($Verbose -or $PK_Untrusted) {
         Print-UEFICerts -Name 'PK' -CertArray ([ref]$PK_Cert)
 
-        if ($PK_Cert -ne $null -and -not $PK_Trusted) {
+        if ($PK_Untrusted) {
             '{0}Platform Key is UNTRUSTED.' -f $Tab8
         }
 
@@ -1677,7 +1689,7 @@ $ScriptBlock = {
         if (('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) -and ('Windows UEFI CA 2023' -in $db_Certs)) {
             "`nRun the command:`n{0}Update_UEFI-CA2023.ps1{1}`n" -f $Tab4, $(if ($RevokeFlags) { ' -Revoke' })
 
-            if (-not $PK_Trusted) {
+            if ($PK_Untrusted) {
                 "Finish the UEFI steps to manually add the Platform Key (PK) cert, if the script provided instructions.`n"
             }
 
@@ -1685,7 +1697,7 @@ $ScriptBlock = {
             break
         }
 
-        if ($PK_Trusted -and (('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) -or $SignedKEK)) {
+        if (-not $PK_Untrusted -and (('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) -or $SignedKEK)) {
             $MergedFlags = $UpdateFlags -bor $RevokeFlags
 
             if ($UpdateFlags -and $RevokeFlags) {
