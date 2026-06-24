@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.06.14
+.VERSION 2026.06.24
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.06.14'
+$ScriptVersion = '2026.06.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -161,20 +161,20 @@ function Confirm-MinimumUBR {
 
     switch ($Build) {
         14393 {
-            if ($UBR -lt 9060) {
-                return "Update Windows $Release to KB5082198 (Apr 2026) or later"
+            if ($UBR -lt 9234) {
+                return "Update Windows $Release to KB5094122 (Jun 2026) or later"
             }
         }
 
         17763 {
-            if ($UBR -lt 8644) {
-                return "Update Windows $Release to KB5082123 (Apr 2026) or later"
+            if ($UBR -lt 8880) {
+                return "Update Windows $Release to KB5094123 (Jun 2026) or later"
             }
         }
 
         { $_ -in 19044,19045 } {
-            if ($UBR -lt 7184) {
-                return "Update W10 $Release to KB5082200 (Apr 2026) or later"
+            if ($UBR -lt 7417) {
+                return "Update W10 $Release to KB5094127 (Jun 2026) or later"
             }
         }
 
@@ -190,9 +190,15 @@ function Confirm-MinimumUBR {
             }
         }
 
-        { $_ -in 22621,22631 } {
-            if ($UBR -lt 6936) {
-                return "Update W11 $Release to KB5082052 (Apr 2026) or later"
+        22621 {
+            if ($UBR -lt 6060) {
+                return "Update W11 $Release to KB5066793 (Oct 2025) or later"
+            }
+        }
+
+        22631 {
+            if ($UBR -lt 7219) {
+                return "Update W11 $Release to KB5093998 (Jun 2026) or later"
             }
         }
 
@@ -203,14 +209,14 @@ function Confirm-MinimumUBR {
         }
 
         { $_ -in 26100,26200 } {
-            if ($UBR -lt 8246) {
-                return "Update W11 $Release to KB5083769 (Apr 2026) or later"
+            if ($UBR -lt 8655) {
+                return "Update W11 $Release to KB5094126 (Jun 2026) or later"
             }
         }
 
         28000 {
-            if ($UBR -lt 1836) {
-                return "Update W11 26H1 to KB5083768 (Apr 2026) or later"
+            if ($UBR -lt 2269) {
+                return "Update W11 26H1 to KB5095051 (Jun 2026) or later"
             }
         }
 
@@ -299,6 +305,18 @@ function Get-HarddiskVolume {
     } while ([Win32.Kernel32]::FindNextVolume([IntPtr] $VolumeHandle, $VolumeName, $Max))
 
     return $null
+}
+
+function Get-FileVersion {
+    param (
+        [Parameter(Mandatory)]
+        [string]$File
+    )
+
+    $FileVersionRaw = (Get-Item -LiteralPath $File).VersionInfo.FileVersionRaw
+    $FileVersion = '{0}.{1}' -f $FileVersionRaw.Build, $FileVersionRaw.Revision
+
+    return $FileVersion
 }
 
 function Print-Header {
@@ -568,7 +586,7 @@ function Get-PFXCert {
     }
 }
 
-function Check-TrustedPK {
+function Check-UntrustedPK {
     try {
         $PKSignatureList = (Get-SecureBootUEFI PK | Get-UefiDatabaseSignatures).SignatureList
     }
@@ -581,7 +599,7 @@ function Check-TrustedPK {
         }
     }
 
-    if ($PKSignatureList.SignatureData.Subject -notmatch 'DO NOT |Example') {
+    if ($PKSignatureList.SignatureData.Subject -match 'DO NOT |Example') {
         return $true
     }
     else {
@@ -828,7 +846,7 @@ function Audit-UEFI {
         }
     }
 
-    if ($PK_Cert.Count -and -not $PK_Trusted) {
+    if ($PK_Untrusted) {
         $CheckList += "{0,-3} [{1}] is UNTRUSTED`n" -f ('{0}.' -f $index++), $PK_Cert
     }
 
@@ -1337,7 +1355,7 @@ $ScriptBlock = {
         exit 1
     }
 
-    $PK_Trusted = Check-TrustedPK
+    $PK_Untrusted = Check-UntrustedPK
 
     if ($PK_Cert -eq 'Microsoft Corporation KEK 2K CA 2023') {
         'ERROR: KEK CA 2023 is not a valid Platform Key'
@@ -1438,7 +1456,7 @@ $ScriptBlock = {
         Remove-Item $EDK2_Folder -Recurse -Force
     }
 
-    if (-not $PK_Trusted) {
+    if ($PK_Untrusted) {
         Update-PK_Cert
     }
 
@@ -1608,6 +1626,19 @@ $ScriptBlock = {
                     $Label = $Volume.FileSystemLabel
 
                     if (Test-Path $EFI_BootMgr_File) {
+                        $Version = Get-FileVersion $EFI_BootMgr_File
+
+                        if ($Version -eq '0.0') {
+                            if ($Label -ne $null) {
+                                'Skipping Third-Party boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
+                            }
+                            else {
+                                'Skipping Third-Party boot media on USB Drive {0}' -f $DriveLetter
+                            }
+
+                            continue
+                        }
+
                         $EFI_BootMgr_File_File_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr_File).Hash
 
                         if ($EFI_BootMgr_File_File_Hash -ne $BootMgrEX_File_Hash) {
@@ -1634,6 +1665,19 @@ $ScriptBlock = {
                         }
                     }
                     else {
+                        $Version = Get-FileVersion $EFI_BootFile
+
+                        if ($Version -eq '0.0') {
+                            if ($Label -ne $null) {
+                                'Skipping Third-Party boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
+                            }
+                            else {
+                                'Skipping Third-Party boot media on USB Drive {0}' -f $DriveLetter
+                            }
+
+                            continue
+                        }
+
                         $EFI_BootFile_Hash = (Get-FileHash -LiteralPath $EFI_BootFile).Hash
 
                         if ($EFI_BootFile_Hash -ne $BootMgrEX_File_Hash) {
