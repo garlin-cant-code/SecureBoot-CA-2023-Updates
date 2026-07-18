@@ -1362,7 +1362,7 @@ $ScriptBlock = {
     }
 
     switch -Regex ($System.Model) {
-       '*LENOVO*M700*' { $Unsafe_Model = $true }
+       ".*LENOVO.*M700.*" { $Unsafe_Model = $true }
     }
 
     if ($Verbose -or $HP_NotSupported -or $Unsafe_Model) {
