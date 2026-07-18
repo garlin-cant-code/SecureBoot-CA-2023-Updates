@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.06.24
+.VERSION 2026.07.18
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.06.24'
+$ScriptVersion = '2026.07.18'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1357,11 +1357,15 @@ $ScriptBlock = {
     }
 
     # https://support.hp.com/ie-en/document/ish_13070353-13070429-16
-    if ($BIOS_Version -match 'HP|Hewlett' -and $BIOS_Version -notmatch 'SBKPFV3') {
+    if ($BIOS_Version -match '^HP(?!\S)|Hewlett' -and $BIOS_Version -notmatch 'SBKPFV3') {
         $HP_NotSupported = $true
     }
 
-    if ($Verbose -or $HP_NotSupported) {
+    switch -Regex ($System.Model) {
+       '*LENOVO*M700*' { $Unsafe_Model = $true }
+    }
+
+    if ($Verbose -or $HP_NotSupported -or $Unsafe_Model) {
         Print-Header 'BIOS Firmware'
         '{0}{1}' -f $Tab4, $Model
         '{0}Version: {1}' -f $Tab4, $BIOS_Version
@@ -1369,6 +1373,9 @@ $ScriptBlock = {
 
         if ($HP_NotSupported) {
             "{0}This version of HP BIOS doesn't support automatic updates." -f $Tab8
+        }
+        elseif ($Unsafe_Model) {
+            '{0}WARNING: {1} may be damaged by updating Secure Boot certs.' -f $Tab8, $Model
         }
     }
 

@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.06.24
+.VERSION 2026.07.18
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.06.24'
+$ScriptVersion = '2026.07.18'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -112,7 +112,8 @@ switch ($Arch) {
     'arm'   { $EDK2_Arch = 'arm' }
 }
 
-$EDK2bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/v1.6.4/edk2-${EDK2_Arch}-secureboot-binaries.zip"
+$EDK2_Version = 'v1.6.5'
+$EDK2bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/$EDK2_Version/edk2-${EDK2_Arch}-secureboot-binaries.zip"
 $PK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/PK/Certificate/WindowsOEMDevicesPK.der'
 
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
@@ -1742,8 +1743,18 @@ $ScriptBlock = {
     }
 }
 
+$System = Get-CimInstance -ClassName Win32_ComputerSystem
+
+switch -Regex ($System.Model) {
+    '*LENOVO*M700*' { $Unsafe_Model = $true }
+}
+
+if ($Unsafe_Model) {
+    Write-Host "WARNING: $System.Model may be damaged by updating Secure Boot certs.  Exiting." -ForegroundColor Red
+    exit 1
+}
+
 if ($Log) {
-    $System = Get-CimInstance -ClassName Win32_ComputerSystem
     $LogFile = '{0}\{1} {2} Update-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
     & $ScriptBlock | Tee-Object $LogFile
