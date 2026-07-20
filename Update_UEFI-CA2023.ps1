@@ -1746,7 +1746,7 @@ $ScriptBlock = {
 $System = Get-CimInstance -ClassName Win32_ComputerSystem
 
 switch -Regex ($System.Model) {
-    '*LENOVO*M700*' { $Unsafe_Model = $true }
+    ".*LENOVO.*M700.*" { $Unsafe_Model = $true }
 }
 
 if ($Unsafe_Model) {
