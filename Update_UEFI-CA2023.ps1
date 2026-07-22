@@ -120,7 +120,7 @@ $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_obje
 $KEK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/KEK/Certificates/microsoft%20corporation%20kek%202k%20ca%202023.der'
 
 $DBXUpdate_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/DBX/$Arch/DBXUpdate.bin"
-$DBXUpdateSVN_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/Optional/DBX/$Arch/DBXUpdateSVN.bin"
+$DBXUpdateSVN_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/Optional/DBX/DBXUpdateSVN.bin"
 
 $Tab4 = ' ' * 4
 
