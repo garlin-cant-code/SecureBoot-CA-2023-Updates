@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.07.18
+.VERSION 2026.07.24
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -92,7 +92,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.07.18'
+$ScriptVersion = '2026.07.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -102,6 +102,7 @@ $EFI_WDSMGR_SVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 $VMWARE_GUID = 'a3d5e95b-0a8f-4753-8735-445afb708f62'
 
 $CN_Regex = '(CN=)([^,]+)'
+$Tab4 = ' ' * 4
 
 $Arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
 
@@ -121,8 +122,6 @@ $KEK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/m
 
 $DBXUpdate_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/DBX/$Arch/DBXUpdate.bin"
 $DBXUpdateSVN_bin_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/Optional/DBX/DBXUpdateSVN.bin"
-
-$Tab4 = ' ' * 4
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
@@ -1544,10 +1543,14 @@ $ScriptBlock = {
     $AvailableUpdates = 0
 
     if ($SkuSiPolicy -or (Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
-        $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity' -ErrorAction SilentlyContinue
+        try {
+            $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity' -ErrorAction Stop
 
-        if ($CodeIntegrity -eq 1) {
-            $UEFI_Lock = $true
+            if ($CodeIntegrity -eq 1) {
+                $UEFI_Lock = $true
+            }
+        }
+        catch {
         }
 
         $SkuSiPolicyFile_Version = Get-SkuSiPolicyVersion $SkuSiPolicy_File
@@ -1613,12 +1616,17 @@ $ScriptBlock = {
                 "No USB removable media found.`n"
             }
             else {
+                $BootStl_File = "$env:SystemRoot\Boot\EFI\boot.stl"
+                $BootStl_File_Hash = (Get-FileHash $BootStl_File).Hash
+
                 foreach ($Volume in $RemovableDrives) {
                     $DriveLetter = $Volume.DriveLetter + ':'
                     $EFI_Path = '{0}\EFI' -f $DriveLetter
 
                     $EFI_BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
                     $EFI_BootFile = "$EFI_Path\Boot\boot${EDK2_Arch}.efi"
+
+                    $EFI_BootStl_File = "$DriveLetter\EFI\Microsoft\Boot\boot.stl"
 
                     if (-not (Test-Path $EFI_BootMgr_File) -and -not (Test-Path $EFI_BootFile)) {
                         continue
@@ -1640,9 +1648,13 @@ $ScriptBlock = {
                             continue
                         }
 
-                        $EFI_BootMgr_File_File_Hash = (Get-FileHash -LiteralPath $EFI_BootMgr_File).Hash
+                        $EFI_BootMgr_File_Hash = (Get-FileHash $EFI_BootMgr_File).Hash
 
-                        if ($EFI_BootMgr_File_File_Hash -ne $BootMgrEX_File_Hash) {
+                        if (Test-Path $EFI_BootStl_File) {
+                            $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
+                        }
+
+                        if (($EFI_BootMgr_File_Hash -ne $BootMgrEX_File_Hash) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
                             $BCD = "$EFI_Path\Microsoft\Boot\BCD"
                             $Backup_BCD = "$env:TEMP\BCD.BAK"
 
@@ -1663,6 +1675,10 @@ $ScriptBlock = {
                                 $_.Exception.Message
                                 exit 1
                             }
+
+                            if (-not (Test-Path $EFI_BootStl_File) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
+                                Copy-Item $BootStl_File $EFI_BootStl_File -Force
+                            }
                         }
                     }
                     else {
@@ -1679,9 +1695,13 @@ $ScriptBlock = {
                             continue
                         }
 
-                        $EFI_BootFile_Hash = (Get-FileHash -LiteralPath $EFI_BootFile).Hash
+                        $EFI_BootFile_File_Hash = (Get-FileHash $EFI_BootFile).Hash
 
-                        if ($EFI_BootFile_Hash -ne $BootMgrEX_File_Hash) {
+                        if (Test-Path $EFI_BootStl_File) {
+                            $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
+                        }
+
+                        if (($EFI_BootFile_File_Hash -ne $BootMgrEX_File_Hash) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
                             $Label = (Get-Volume -DriveLetter $Volume.DriveLetter).FileSystemLabel
 
                             if ($Label -ne '') {
@@ -1697,6 +1717,10 @@ $ScriptBlock = {
                             catch {
                                 $_.Exception.Message
                                 exit 1
+                            }
+
+                            if (-not (Test-Path $EFI_BootStl_File) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
+                                Copy-Item $BootStl_File $EFI_BootStl_File -Force
                             }
 
                             $Media_Updated = $true
@@ -1744,13 +1768,33 @@ $ScriptBlock = {
 }
 
 $System = Get-CimInstance -ClassName Win32_ComputerSystem
+$Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
 
-switch -Regex ($System.Model) {
-    ".*LENOVO.*M700.*" { $Unsafe_Model = $true }
+switch -Regex ($Model) {
+    'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
+    'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
+
+    default {
+        try {
+            $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel'
+        }
+        catch {
+        }
+
+        if ($ConfidenceLevel -match 'Temporarily Paused|Not Supported') {
+            $Unsafe_Model = $true
+        }
+    }
 }
 
 if ($Unsafe_Model) {
-    Write-Host "WARNING: $System.Model may be damaged by updating Secure Boot certs.  Exiting." -ForegroundColor Red
+    if ($ConfidenceLevel -match 'Temporarily Paused') {
+        Write-Host "WARNING: $System.Model may be corrupted by updating Secure Boot certs.  Exiting." -ForegroundColor Red
+    }
+    else {
+        Write-Host "WARNING: $System.Model could be damaged by updating Secure Boot certs.  Exiting." -ForegroundColor Red
+    }
+
     exit 1
 }
 
