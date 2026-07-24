@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.07.18
+.VERSION 2026.07.24
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.07.18'
+$ScriptVersion = '2026.07.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -88,6 +88,10 @@ $VMWARE_GUID = 'a3d5e95b-0a8f-4753-8735-445afb708f62'
 
 $CN_Regex = '(CN=)([^,]+)'
 
+$Tab4 = ' ' * 4
+$Tab8 = ' ' * 8
+$Tab12 = ' ' * 12
+
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
 
 if ([Environment]::Is64BitProcess) {
@@ -96,10 +100,6 @@ if ([Environment]::Is64BitProcess) {
 else {
     $UpdatesFolder = "$env:SystemRoot\SysNative\SecureBootUpdates"
 }
-
-$Tab4 = ' ' * 4
-$Tab8 = ' ' * 8
-$Tab12 = ' ' * 12
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
@@ -1098,7 +1098,10 @@ function Validate-BootMgrFile
         [string]$Label,
 
         [Parameter(Mandatory)]
-        [string]$Indent
+        [string]$Indent,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$SkipNewLine
     )
 
     $PFXCert = Get-PFXCert $BootMgr_File
@@ -1106,7 +1109,7 @@ function Validate-BootMgrFile
 
     switch -Regex (Validate-PFXCert $PFXCert) {
         'BANNED|UNTRUSTED' {
-            '{0}Boot File [{1}] {2} {3}' -f $Indent, ($PFXCert -replace 'Microsoft Windows '), $Verb, $_
+            '{0}{1} [{2}] {3} {4}.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb, $_
         }
 
         'ALLOWED' {
@@ -1123,20 +1126,65 @@ function Validate-BootMgrFile
         $Version = Get-FileVersion $BootMgr_File
         $Indent += $Tab4
 
+        if ($SkipNewLine) {
+            $NewLine = $null
+        }
+        else {
+            $NewLine = "`n"
+        }
+
         if ($Version -ne '0.0') {
             if ($BootMgrSVN -ne $null) {
-                "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, $Version, $BootMgrSVN
+                "{0}{1}`n{2}File Version: {3}, SVN {4}{5}" -f $Indent, $BootMgr_File, $Indent, $Version, $BootMgrSVN, $NewLine
             }
             else {
-                "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, $Version
+                "{0}{1}`n{2}File Version: {3}{4}" -f $Indent, $BootMgr_File, $Indent, $Version, $NewLine
             }
         }
         else {
-            "{0}{1}`n{2}[THIRD-PARTY] EFI File`n" -f $Indent, $BootMgr_File, $Indent
+            "{0}{1}`n{2}[THIRD-PARTY] EFI File{3}" -f $Indent, $BootMgr_File, $Indent, $NewLine
         }
     }
     else {
-        Write-Output ''
+        if (-not $SkipNewLine) {
+            Write-Output ''
+        }
+    }
+}
+
+function Check-BootStl {
+    param (
+        [Parameter(Mandatory)]
+        [string]$BootStl_File
+    )
+
+    $EFI_BootStl_File = "$env:SystemRoot\Boot\EFI\boot.stl"
+
+    if (-not (Test-Path $BootStl_File)) {
+        "{0}{1} is MISSING.`n" -f $Tab8, $BootStl_File
+    }
+    else {
+        $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
+        $BootStl_File_Hash = (Get-FileHash $BootStl_File).Hash
+
+        try {
+            $Update = ' [{0}]' -f ((& certutil -dump $BootStl_File | Select-String 'ThisUpdate') -replace ' ThisUpdate: ')
+        }
+        catch {
+            $Update = $null
+        }
+
+        if (-not $Verbose) {
+            $BootStl_File = 'boot.stl'
+            $Update = $null
+        }
+
+        if ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash) {
+            "{0}{1}{2} is WRONG VERSION.`n" -f $Tab8, $BootStl_File, $Update
+        }
+        else {
+            "{0}{1}{2} is CURRENT.`n" -f $Tab8, $BootStl_File, $Update
+        }
     }
 }
 
@@ -1177,6 +1225,7 @@ function Check-BootMedia {
 
         $EFI_BootMgr_File = "${DriveLetter}:\EFI\Microsoft\Boot\bootmgfw.efi"
         $EFI_BootFile = "${DriveLetter}:\EFI\Boot\boot${Arch}.efi"
+
         $Boot_WIM = "${DriveLetter}:\sources\boot.wim"
         $WIM_Formats = @('wim','esd','swm')
 
@@ -1203,6 +1252,10 @@ function Check-BootMedia {
             Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab8
         }
 
+        if ($DriveType -eq 'USB') {
+            Check-BootStl "${DriveLetter}:\EFI\Microsoft\Boot\boot.stl"
+        }
+
         if (Test-Path $Boot_WIM) {
             try {
                 $Index = (Get-WindowsImage -ImagePath $Boot_WIM -Name *Setup*).ImageIndex
@@ -1221,6 +1274,8 @@ function Check-BootMedia {
                 }
             }
         }
+
+        $LineBreak = $true
 
         foreach ($Format in $WIM_Formats) {
             $ImageFile = "${DriveLetter}:\sources\install.$Format"
@@ -1253,7 +1308,12 @@ function Check-BootMedia {
                 }
 
                 Write-Output ''
+                $LineBreak = $false
             }
+        }
+
+        if ($LineBreak) {
+            Write-Output ''
         }
     }
 }
@@ -1268,6 +1328,7 @@ $ScriptBlock = {
 
     $System = Get-CimInstance -ClassName Win32_ComputerSystem
     $BIOS = Get-CimInstance -ClassName Win32_BIOS
+
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
 
     $SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
@@ -1361,8 +1422,21 @@ $ScriptBlock = {
         $HP_NotSupported = $true
     }
 
-    switch -Regex ($System.Model) {
-       ".*LENOVO.*M700.*" { $Unsafe_Model = $true }
+    switch -Regex ($Model) {
+        'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
+        'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
+
+        default {
+            try {
+                $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel'
+            }
+            catch {
+            }
+
+            if ($ConfidenceLevel -match 'Temporarily Paused|Not Supported') {
+                $Unsafe_Model = $true
+            }
+        }
     }
 
     if ($Verbose -or $HP_NotSupported -or $Unsafe_Model) {
@@ -1375,7 +1449,12 @@ $ScriptBlock = {
             "{0}This version of HP BIOS doesn't support automatic updates." -f $Tab8
         }
         elseif ($Unsafe_Model) {
-            '{0}WARNING: {1} may be damaged by updating Secure Boot certs.' -f $Tab8, $Model
+            if ($ConfidenceLevel -match 'Temporarily Paused') {
+                '{0}This BIOS may be corrupted by updating Secure Boot certs.' -f $Tab8
+            }
+            else {
+                '{0}This BIOS could be damaged by updating Secure Boot certs.' -f $Tab8
+            }
         }
     }
 
@@ -1557,7 +1636,7 @@ $ScriptBlock = {
 
     $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
 
-    switch -Regex ($EFI_Device) {
+    switch -Regex (, $EFI_Device) {
         'Harddisk' {
             $EFI_Path = '\\.\{0}\EFI' -f ($EFI_Device -split '\\')[-1]
         }
@@ -1575,7 +1654,6 @@ $ScriptBlock = {
             $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $Matches[0])
         }
 
-        # Worse case fallback
         default {
             $SystemDisk = (Get-CimInstance -Namespace 'Root\CIMv2' -Query 'SELECT * FROM Win32_DiskPartition' | where { $_.Type -eq 'GPT: System' }).DiskIndex
             $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
@@ -1659,6 +1737,49 @@ $ScriptBlock = {
     }
 
     if ($BootMedia) {
+        try {
+            $InstallDir = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Macrium\RescuePE' -Name 'InstallDir'
+        }
+        catch {
+            $InstallDir = "$env:SystemDrive\boot"
+        }
+
+        $Macrium_WinRE_BootMgr_File = "$InstallDir\macrium\WinREFiles\media\EFI\Microsoft\Boot\bootmgfw.efi"
+        $Macrium_WinPE_BootFile = "$InstallDir\macrium\\WA11KFiles\media\EFI\Boot\bootx64.efi"
+
+        if ((Test-Path $Macrium_WinRE_BootMgr_File) -or (Test-Path $Macrium_WinPE_BootFile)) {
+            Print-Header 'Macrium Folders'
+        }
+
+        if (Test-Path $Macrium_WinRE_BootMgr_File) {
+            if ($Verbose -and (Test-Path $Macrium_WinPE_BootFile)) {
+                Validate-BootMgrFile -BootMgr_File $Macrium_WinRE_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
+            }
+            else {
+                Validate-BootMgrFile -BootMgr_File $Macrium_WinRE_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4 -SkipNewLine
+            }
+        }
+
+        if (Test-Path $Macrium_WinPE_BootFile) {
+            Validate-BootMgrFile -BootMgr_File $Macrium_WinPE_BootFile -Label 'Boot File' -Indent $Tab4 -SkipNewLine
+        }
+
+        try {
+            $HasleoVersion = [Version](Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" | where { $_.DisplayName -match 'Hasleo Backup Suite' }).DisplayVersion
+        }
+        catch {
+            $HasleoVersion = [Version]'0.0.0.0'
+        }
+
+        if ($HasleoVersion -lt [Version]'5.8.2.2') {
+            $Hasleo_StagedBootMgr_File = "$env:ProgramFiles\Hasleo\Hasleo Backup Suite\bin\WADK\Boot\EFI_EX\bootmgfw.efi"
+
+            if (Test-Path $Hasleo_StagedBootMgr_File) {
+                Print-Header 'Hasleo Folder'
+                Validate-BootMgrFile -BootMgr_File $Hasleo_StagedBootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4 -SkipNewLine
+            }
+        }
+
         Check-BootMedia
     }
 
@@ -1676,7 +1797,32 @@ $ScriptBlock = {
         }
     }
 
-    if ($UpdateFlags -or $RevokeFlags -or $UpdateSkuSiPolicy) {
+    if ($Unsafe_Model -and ($UpdateFlags -band 0x4)) {
+        if (-not $BootMedia) { '' }
+        Print-Header 'STATUS REPORT'
+
+        try {
+            $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'UEFICA2023Status'
+            '{0}Registry: "UEFICA2023Status" = {1}' -f $Tab4, $UEFICA2023Status
+        }
+        catch {
+        }
+
+        if ($ConfidenceLevel) {
+            '{0}Registry: "ConfidenceLevel" = {1}' -f $Tab4, $ConfidenceLevel
+        }
+
+        switch ($ConfidenceLevel) {
+            'Temporarily Paused' {
+                "`n{0}This device is affected by a known issue. This may require a firmware update." -f $Tab4
+            }
+            'Not Supported' {
+                "`n{0}This device may have a hardware or firmware limitation blocking updates." -f $Tab4
+                '{0}Please do not attempt to manually enroll Secure Boot keys.' -f $Tab4
+            }
+        }
+    }
+    elseif ($UpdateFlags -or $RevokeFlags -or $UpdateSkuSiPolicy) {
         if ($BitLocker_Enabled -and $UpdateFlags -ne 0x100) {
             $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
 
