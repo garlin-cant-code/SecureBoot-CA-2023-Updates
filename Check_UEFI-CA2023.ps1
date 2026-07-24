@@ -1738,7 +1738,7 @@ $ScriptBlock = {
 
     if ($BootMedia) {
         try {
-            $InstallDir = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Macrium\RescuePE' -Name 'InstallDir'
+            $InstallDir = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Macrium\RescuePE' -Name 'InstallDir' -ErrorAction Stop
         }
         catch {
             $InstallDir = "$env:SystemDrive\boot"
