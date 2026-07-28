@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.07.24
+.VERSION 2026.07.28
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -77,7 +77,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.07.24'
+$ScriptVersion = '2026.07.28'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1407,6 +1407,23 @@ $ScriptBlock = {
         $WindowsHello = $true
     }
 
+    try {
+        $PKDefault_Cert = Get-UEFICert PKDefault
+        $KEKDefault_Certs = Get-UEFICert KEKDefault
+        $dbDefault_Certs = Get-UEFICert dbDefault
+        $dbxDefault_Certs = Get-UEFICert dbxDefault
+
+        $PK_Cert = Get-UEFICert PK
+        $KEK_Certs = Get-UEFICert KEK
+        $db_Certs = Get-UEFICert db
+        $dbx_Certs = Get-UEFICert dbx
+    }
+    catch {
+        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -ForegroundColor Red
+        $_.Exception.Message
+        exit 1
+    }
+
     $Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
     $BIOS_Version = $BIOS.SMBIOSBIOSVersion
 
@@ -1417,24 +1434,26 @@ $ScriptBlock = {
         $BIOS_Date = $null
     }
 
-    # https://support.hp.com/ie-en/document/ish_13070353-13070429-16
-    if ($BIOS_Version -match '^HP(?!\S)|Hewlett' -and $BIOS_Version -notmatch 'SBKPFV3') {
-        $HP_NotSupported = $true
-    }
+    if ($KEK_Certs -notcontains 'Microsoft Corporation KEK 2K CA 2023' -and $dbx_Certs -notcontains 'Microsoft Windows Production PCA 2011') {
+        # https://support.hp.com/ie-en/document/ish_13070353-13070429-16
+        if ($BIOS_Version -match '^HP(?!\S)|Hewlett' -and $BIOS_Version -notmatch 'SBKPFV3') {
+            $HP_NotSupported = $true
+        }
 
-    switch -Regex ($Model) {
-        'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
-        'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
+        switch -Regex ($Model) {
+            'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
+            'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
 
-        default {
-            try {
-                $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel'
-            }
-            catch {
-            }
+            default {
+                try {
+                    $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel'
+                }
+                catch {
+                }
 
-            if ($ConfidenceLevel -match 'Temporarily Paused|Not Supported') {
-                $Unsafe_Model = $true
+                if ($ConfidenceLevel -match 'Temporarily Paused|Not Supported') {
+                    $Unsafe_Model = $true
+                }
             }
         }
     }
@@ -1492,23 +1511,6 @@ $ScriptBlock = {
         }
 
         $SetupMode = $true
-    }
-
-    try {
-        $PKDefault_Cert = Get-UEFICert PKDefault
-        $KEKDefault_Certs = Get-UEFICert KEKDefault
-        $dbDefault_Certs = Get-UEFICert dbDefault
-        $dbxDefault_Certs = Get-UEFICert dbxDefault
-
-        $PK_Cert = Get-UEFICert PK
-        $KEK_Certs = Get-UEFICert KEK
-        $db_Certs = Get-UEFICert db
-        $dbx_Certs = Get-UEFICert dbx
-    }
-    catch {
-        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -ForegroundColor Red
-        $_.Exception.Message
-        exit 1
     }
 
     $PK_Untrusted = Check-UntrustedPK
