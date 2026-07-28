@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.07.24
+.VERSION 2026.07.28
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -71,13 +71,16 @@ param (
     [string]$UpdatesFolder = $(if ([Environment]::Is64BitProcess) { "$env:SystemRoot\System32\SecureBootUpdates" } else { "$env:SystemRoot\SysNative\SecureBootUpdates" }),
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [switch]$Force,
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Audit,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Latest,
+    [switch]$Revoke,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Revoke,
+    [switch]$Latest,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$SkuSiPolicy,
@@ -92,7 +95,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.07.24'
+$ScriptVersion = '2026.07.28'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1269,6 +1272,8 @@ function Update-EFI_BootManager {
 }
 
 $ScriptBlock = {
+    $System = Get-CimInstance -ClassName Win32_ComputerSystem
+
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
     $SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
     $Result = Confirm-MinimumUBR
@@ -1310,6 +1315,63 @@ $ScriptBlock = {
         $WindowsHello = $true
     }
 
+    try {
+        $PK_Cert = Get-UEFICert PK
+        $KEK_Certs = Get-UEFICert KEK
+        $db_Certs = Get-UEFICert db
+        $dbx_Certs = Get-UEFICert dbx
+    }
+    catch {
+        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -ForegroundColor Red
+        exit 1
+    }
+
+    $Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
+
+    if ($KEK_Certs -notcontains 'Microsoft Corporation KEK 2K CA 2023' -and $dbx_Certs -notcontains 'Microsoft Windows Production PCA 2011') {
+        switch -Regex ($Model) {
+            'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
+            'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
+
+            default {
+                try {
+                    $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel'
+                }
+                catch {
+                }
+
+                if ($ConfidenceLevel -match 'Temporarily Paused|Not Supported') {
+                    $Unsafe_Model = $true
+                }
+            }
+        }
+    }
+
+    if ($Unsafe_Model) {
+        if ($Force) {
+            Write-Host "WARNING: Updating $Model can lead to possible corruption or damage.`n" -ForegroundColor Red
+            $Confirmation = Read-Host -Prompt 'Please confirm you want to force an update.  Enter "YES" to confirm'
+
+            if ($Confirmation -ne "YES") {
+                "User did not enter the correct confirmation. Exiting.`n"
+                exit 0
+            }
+
+            "User entered the correct confirmation. Script will force an update.`n"
+        }
+        else {
+            if ($ConfidenceLevel -match 'Temporarily Paused') {
+                Write-Host "WARNING: $Model may be corrupted by updating Secure Boot certs.`n" -ForegroundColor Red
+            }
+            else {
+                Write-Host "WARNING: $Model could be damaged by updating Secure Boot certs.`n" -ForegroundColor Red
+            }
+
+            "Registry: `"ConfidenceLevel`" = $ConfidenceLevel`n"
+            exit 1
+        }
+    }
+
     foreach ($Variable in 'PK','KEK','db','dbx') {
         try {
             $Count = (Get-SecureBootUEFI $Variable).Bytes.Count
@@ -1342,17 +1404,6 @@ $ScriptBlock = {
         }
 
         $SetupMode = $true
-    }
-
-    try {
-        $PK_Cert = Get-UEFICert PK
-        $KEK_Certs = Get-UEFICert KEK
-        $db_Certs = Get-UEFICert db
-        $dbx_Certs = Get-UEFICert dbx
-    }
-    catch {
-        Write-Host 'ERROR: Failed to read UEFI Secure Boot settings.' -ForegroundColor Red
-        exit 1
     }
 
     $PK_Untrusted = Check-UntrustedPK
@@ -1767,38 +1818,8 @@ $ScriptBlock = {
     }
 }
 
-$System = Get-CimInstance -ClassName Win32_ComputerSystem
-$Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
-
-switch -Regex ($Model) {
-    'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
-    'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
-
-    default {
-        try {
-            $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel'
-        }
-        catch {
-        }
-
-        if ($ConfidenceLevel -match 'Temporarily Paused|Not Supported') {
-            $Unsafe_Model = $true
-        }
-    }
-}
-
-if ($Unsafe_Model) {
-    if ($ConfidenceLevel -match 'Temporarily Paused') {
-        Write-Host "WARNING: $System.Model may be corrupted by updating Secure Boot certs.  Exiting." -ForegroundColor Red
-    }
-    else {
-        Write-Host "WARNING: $System.Model could be damaged by updating Secure Boot certs.  Exiting." -ForegroundColor Red
-    }
-
-    exit 1
-}
-
-if ($Log) {
+if ($Force -or $Log) {
+    $System = Get-CimInstance -ClassName Win32_ComputerSystem
     $LogFile = '{0}\{1} {2} Update-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
     & $ScriptBlock | Tee-Object $LogFile

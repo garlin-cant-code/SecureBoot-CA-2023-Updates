@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.07.24
+$VERSION 2026.07.28
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -52,14 +52,14 @@ param (
     [Parameter(Mandatory=$false,ParameterSetName='Version')]
     [switch]$Version,
 
-    [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Log,
-
     [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
-    [string[]]$Paths = @()
+    [string[]]$Paths = @(),
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [switch]$Log
 )
 
-$ScriptVersion = '2026.07.24'
+$ScriptVersion = '2026.07.28'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
