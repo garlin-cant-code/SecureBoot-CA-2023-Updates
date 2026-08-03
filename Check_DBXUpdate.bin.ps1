@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.07.28
+$VERSION 2026.08.03
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [switch]$Log
 )
 
-$ScriptVersion = '2026.07.28'
+$ScriptVersion = '2026.08.03'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -259,6 +259,15 @@ if ($PSBoundParameters['Verbose']) {
     $Verbose = $true
     $VerbosePreference = 'SilentlyContinue'
 }
+
+switch ($env:PROCESSOR_ARCHITECTURE) {
+    'amd64' { $Arch = 'x64' }
+    'x86'   { $Arch = 'x86' }
+    'arm64' { $Arch = 'aa64' }
+    'arm'   { $Arch = 'aa32' }
+}
+
+$System = Get-CimInstance -ClassName Win32_ComputerSystem
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
@@ -673,13 +682,6 @@ function Compare-DBXSignatureData {
     }
 }
 
-switch ($env:PROCESSOR_ARCHITECTURE) {
-    'amd64' { $Arch = 'x64' }
-    'x86'   { $Arch = 'x86' }
-    'arm64' { $Arch = 'aa64' }
-    'arm'   { $Arch = 'aa32' }
-}
-
 if ($Verbose) {
     try {
         $JSON = (Invoke-WebRequest -UseBasicParsing -Uri $DBXinfo_URL).Content | ConvertFrom-Json
@@ -690,7 +692,6 @@ if ($Verbose) {
     }
 }
 
-$System = Get-CimInstance -ClassName Win32_ComputerSystem
 $LogFile = '{0}\{1} {2} Check-DBXUpdate.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
 if (Test-Path $LogFile) {

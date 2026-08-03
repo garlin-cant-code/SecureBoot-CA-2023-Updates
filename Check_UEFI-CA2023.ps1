@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.07.28
+.VERSION 2026.08.03
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -37,14 +37,6 @@
 
     If Secure Boot is currently disabled, audit report will simulate conditions where Secure Boot is enabled.
 
-.PARAMETER BootMedia
-    Search all mounted removable media (DVD & USB drives), for Windows boot files and install images.  Validate if boot file and install image are allowed by
-    current Secure Boot settings.
-
-.PARAMETER NoSkip
-    When checking Windows install files on removable media, examine every image in the install WIM/ESD file.
-    By default, -BootMedia parameter stops checking after the first image in the install file to improve script reporting time.
-
 .PARAMETER Log
     Save script output to a file named "YYYY-MM-DD [Model] Check UEFI.log"
 
@@ -53,7 +45,7 @@
 .EXAMPLE
     Check_UEFI-CA2023.ps1 -Audit
 .EXAMPLE
-    Check_UEFI-CA2023.ps1 -Verbose -Audit -BootMedia -Log
+    Check_UEFI-CA2023.ps1 -Verbose -Audit -Log
 #>
 
 [CmdletBinding(DefaultParameterSetName='Default')]
@@ -68,16 +60,13 @@ param (
     [switch]$BootMedia,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$NoSkip,
-
-    [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Log,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.07.28'
+$ScriptVersion = '2026.08.03'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -90,16 +79,8 @@ $CN_Regex = '(CN=)([^,]+)'
 
 $Tab4 = ' ' * 4
 $Tab8 = ' ' * 8
-$Tab12 = ' ' * 12
 
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
-
-if ([Environment]::Is64BitProcess) {
-    $UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates"
-}
-else {
-    $UpdatesFolder = "$env:SystemRoot\SysNative\SecureBootUpdates"
-}
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
@@ -129,6 +110,25 @@ if ($PSBoundParameters['Verbose']) {
     $Verbose = $true
     $VerbosePreference = 'SilentlyContinue'
 }
+
+if ([Environment]::Is64BitProcess) {
+    $UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates"
+}
+else {
+    $UpdatesFolder = "$env:SystemRoot\SysNative\SecureBootUpdates"
+}
+
+switch ($env:PROCESSOR_ARCHITECTURE) {
+    'amd64' { $Arch = 'x64' }
+    'x86'   { $Arch = 'x86' }
+    'arm64' { $Arch = 'aa64' }
+    'arm'   { $Arch = 'aa32' }
+}
+
+$System = Get-CimInstance -ClassName Win32_ComputerSystem
+$BIOS = Get-CimInstance -ClassName Win32_BIOS
+
+$SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
@@ -855,25 +855,6 @@ function Get-BootManagerSVN {
     return $BootMgrSVN
 }
 
-function Get-SkuSiPolicyVersion {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory)]
-        [String]$BinaryFilePath
-    )
-
-    $Bytes = [IO.File]::ReadAllBytes($BinaryFilePath)
-
-    if ([System.Text.Encoding]::ASCII.GetString($bytes) -replace "`0" -match '\d+(\.\d+)+') {
-        $Version = $Matches[0]
-    }
-    else {
-        $Version = $null
-    }
-
-    return $Version
-}
-
 function Get-UEFI_DeviceGuard {
     $LastBootUpTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
     $Events = Get-WinEvent -FilterHashtable @{ProviderName='Microsoft-Windows-Kernel-Boot'; Id=153; StartTime=$LastBootUpTime} -ErrorAction SilentlyContinue | where { $_.Message -match 'VBS locked' }
@@ -918,6 +899,77 @@ function Get-SbatLevel {
     }
 
     return $SbatLevel
+}
+
+function Validate-BootMgrFile
+{
+    param (
+        [Parameter(Mandatory)]
+        [string]$BootMgr_File,
+
+        [Parameter(Mandatory)]
+        [string]$Label,
+
+        [Parameter(Mandatory)]
+        [string]$Indent
+    )
+
+    $PFXCert = Get-PFXCert $BootMgr_File
+    $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
+
+    switch -Regex (Validate-PFXCert $PFXCert) {
+        'BANNED|UNTRUSTED' {
+            '{0}{1} [{2}] {3} {4}.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb, $_
+        }
+
+        'ALLOWED' {
+            if (-not $SecureBoot -or $BootMgrSVN -ge $UEFI_SVN) {
+                '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+            }
+            else {
+                '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
+            }
+        }
+    }
+
+    if ($Verbose) {
+        $Version = Get-FileVersion $BootMgr_File
+        $Indent += $Tab4
+
+        if ($Version -ne '0.0') {
+            if ($BootMgrSVN -ne $null) {
+                "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, $Version, $BootMgrSVN
+            }
+            else {
+                "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, $Version
+            }
+        }
+        else {
+            "{0}{1}`n{2}[THIRD-PARTY] EFI File`n" -f $Indent, $BootMgr_File, $Indent
+        }
+    }
+    else {
+        Write-Output ''
+    }
+}
+
+function Get-SkuSiPolicyVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [String]$BinaryFilePath
+    )
+
+    $Bytes = [IO.File]::ReadAllBytes($BinaryFilePath)
+
+    if ([System.Text.Encoding]::ASCII.GetString($bytes) -replace "`0" -match '\d+(\.\d+)+') {
+        $Version = $Matches[0]
+    }
+    else {
+        $Version = $null
+    }
+
+    return $Version
 }
 
 function Audit-UEFI {
@@ -1088,250 +1140,8 @@ function Run-FiniteStateMachine {
     }
 }
 
-function Validate-BootMgrFile
-{
-    param (
-        [Parameter(Mandatory)]
-        [string]$BootMgr_File,
-
-        [Parameter(Mandatory)]
-        [string]$Label,
-
-        [Parameter(Mandatory)]
-        [string]$Indent,
-
-        [Parameter(Mandatory=$false)]
-        [switch]$SkipNewLine
-    )
-
-    $PFXCert = Get-PFXCert $BootMgr_File
-    $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
-
-    switch -Regex (Validate-PFXCert $PFXCert) {
-        'BANNED|UNTRUSTED' {
-            '{0}{1} [{2}] {3} {4}.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb, $_
-        }
-
-        'ALLOWED' {
-            if (-not $SecureBoot -or $BootMgrSVN -ge $UEFI_SVN) {
-                '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
-            }
-            else {
-                '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $Verb
-            }
-        }
-    }
-
-    if ($Verbose) {
-        $Version = Get-FileVersion $BootMgr_File
-        $Indent += $Tab4
-
-        if ($SkipNewLine) {
-            $NewLine = $null
-        }
-        else {
-            $NewLine = "`n"
-        }
-
-        if ($Version -ne '0.0') {
-            if ($BootMgrSVN -ne $null) {
-                "{0}{1}`n{2}File Version: {3}, SVN {4}{5}" -f $Indent, $BootMgr_File, $Indent, $Version, $BootMgrSVN, $NewLine
-            }
-            else {
-                "{0}{1}`n{2}File Version: {3}{4}" -f $Indent, $BootMgr_File, $Indent, $Version, $NewLine
-            }
-        }
-        else {
-            "{0}{1}`n{2}[THIRD-PARTY] EFI File{3}" -f $Indent, $BootMgr_File, $Indent, $NewLine
-        }
-    }
-    else {
-        if (-not $SkipNewLine) {
-            Write-Output ''
-        }
-    }
-}
-
-function Check-BootStl {
-    param (
-        [Parameter(Mandatory)]
-        [string]$BootStl_File
-    )
-
-    $EFI_BootStl_File = "$env:SystemRoot\Boot\EFI\boot.stl"
-
-    if (-not (Test-Path $BootStl_File)) {
-        "{0}{1} is MISSING.`n" -f $Tab8, $BootStl_File
-    }
-    else {
-        $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
-        $BootStl_File_Hash = (Get-FileHash $BootStl_File).Hash
-
-        try {
-            $Update = ' [{0}]' -f ((& certutil -dump $BootStl_File | Select-String 'ThisUpdate') -replace ' ThisUpdate: ')
-        }
-        catch {
-            $Update = $null
-        }
-
-        if (-not $Verbose) {
-            $BootStl_File = 'boot.stl'
-            $Update = $null
-        }
-
-        if ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash) {
-            "{0}{1}{2} is WRONG VERSION.`n" -f $Tab8, $BootStl_File, $Update
-        }
-        else {
-            "{0}{1}{2} is CURRENT.`n" -f $Tab8, $BootStl_File, $Update
-        }
-    }
-}
-
-function Check-WIM_BootManager {
-    param (
-        [Parameter(Mandatory)]
-        [string]$WIM_File,
-
-        [Parameter(Mandatory)]
-        [int]$Index
-    )
-
-    $WIM_Image = '{0}:{1}' -f (Split-Path $WIM_File -Leaf), $Index
-
-    if (((& dism /list-image /imagefile:$WIM_File /index:$Index) -match '\\bootmgfw_EX.efi').Count) {
-        '{0}{1,-13} Boot Manager [Windows UEFI CA 2023] is PRESENT.' -f $Tab8, $WIM_Image
-    }
-    else {
-        if ($SecureBoot -and $dbx_Certs -contains 'Microsoft Windows Production PCA 2011') {
-            '{0}{1,-13} Boot Manager [Production PCA 2011] {2} BANNED.' -f $Tab8, $WIM_Image, $Verb
-        }
-        else {
-            '{0}{1,-13} Boot Manager [Production PCA 2011] {2} ALLOWED.' -f $Tab8, $WIM_Image, $Verb
-        }
-    }
-}
-
-function Check-BootMedia {
-    $RemovableDrives = Get-Volume | where { $_.DriveType -in 'CD-ROM','Removable' -and $_.DriveLetter -ne $null -and $_.OperationalStatus -eq 'OK' } | sort DriveLetter
-
-    if ($RemovableDrives.Count -eq 0) {
-        return
-    }
-
-    Print-Header 'Bootable Media'
-    foreach ($Volume in $RemovableDrives) {
-        $DriveLetter = $Volume.DriveLetter
-
-        $EFI_BootMgr_File = "${DriveLetter}:\EFI\Microsoft\Boot\bootmgfw.efi"
-        $EFI_BootFile = "${DriveLetter}:\EFI\Boot\boot${Arch}.efi"
-
-        $Boot_WIM = "${DriveLetter}:\sources\boot.wim"
-        $WIM_Formats = @('wim','esd','swm')
-
-        if ($Volume.DriveType -eq 'Removable') {
-            $DriveType = 'USB'
-        }
-        else {
-            $DriveType = 'DVD'
-        }
-
-        $Label = $Volume.FileSystemLabel
-
-        if ($Label -ne '') {
-            '{0}{1} Drive {2}: "{3}"' -f $Tab4, $DriveType, $DriveLetter, $Label
-        }
-        else {
-            '{0}{1} Drive {2}:' -f $Tab4, $DriveType, $DriveLetter
-        }
-
-        if (Test-Path $EFI_BootMgr_File) {
-            Validate-BootMgrFile -BootMgr_File $EFI_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab8
-        }
-        elseif (Test-Path $EFI_BootFile) {
-            Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab8
-        }
-
-        if ($DriveType -eq 'USB') {
-            Check-BootStl "${DriveLetter}:\EFI\Microsoft\Boot\boot.stl"
-        }
-
-        if (Test-Path $Boot_WIM) {
-            try {
-                $Index = (Get-WindowsImage -ImagePath $Boot_WIM -Name *Setup*).ImageIndex
-
-                if ($Index -eq $null) {
-                    $Index = (Get-WindowsImage -ImagePath $Boot_WIM).Count
-                }
-
-                Check-WIM_BootManager -WIM_File $Boot_WIM -Index $Index
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-
-                if ($ErrorMessage -ne 'There is no matching image.') {
-                    $ErrorMessage
-                }
-            }
-        }
-
-        $LineBreak = $true
-
-        foreach ($Format in $WIM_Formats) {
-            $ImageFile = "${DriveLetter}:\sources\install.$Format"
-
-            if (Test-Path $ImageFile) {
-                $ImageCount = (Get-WindowsImage -ImagePath $ImageFile).Count
-
-                if ($NoSkip) {
-                    $Count = $ImageCount
-                }
-                else {
-                    $Count = 1
-                }
-
-                try {
-                    for ($i = 1; $i -le $Count; $i++) {
-                        Check-WIM_BootManager -WIM_File $ImageFile -Index $i
-                    }
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-
-                    if ($ErrorMessage -ne 'There is no matching image.') {
-                        $ErrorMessage
-                    }
-                }
-
-                if ($ImageCount -gt 1 -and -not $NoSkip) {
-                    '{0}Skipping checks on next {1} install.{2} images.' -f $Tab12, --$ImageCount, $Format
-                }
-
-                Write-Output ''
-                $LineBreak = $false
-            }
-        }
-
-        if ($LineBreak) {
-            Write-Output ''
-        }
-    }
-}
-
 $ScriptBlock = {
-    switch ($env:PROCESSOR_ARCHITECTURE) {
-        'amd64' { $Arch = 'x64' }
-        'x86'   { $Arch = 'x86' }
-        'arm64' { $Arch = 'aa64' }
-        'arm'   { $Arch = 'aa32' }
-    }
-
-    $System = Get-CimInstance -ClassName Win32_ComputerSystem
-    $BIOS = Get-CimInstance -ClassName Win32_BIOS
-
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
-
-    $SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
 
     # Force a refresh of reg key 'WindowsUEFICA2023Capable'
     Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
@@ -1371,7 +1181,13 @@ $ScriptBlock = {
         $VBS_Enabled = $true
     }
     else {
-        'Virtualization Based Security: OFF'
+        if ($Audit) {
+            'Virtualization Based Security: OFF (Audit Report runs as ON)'
+            $VBS_Enabled = $true
+        }
+        else {
+            'Virtualization Based Security: OFF'
+        }
     }
 
     try {
@@ -1738,57 +1554,9 @@ $ScriptBlock = {
         }
     }
 
-    if ($BootMedia) {
-        try {
-            $InstallDir = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Macrium\RescuePE' -Name 'InstallDir' -ErrorAction Stop
-        }
-        catch {
-            $InstallDir = "$env:SystemDrive\boot"
-        }
-
-        $Macrium_WinRE_BootMgr_File = "$InstallDir\macrium\WinREFiles\media\EFI\Microsoft\Boot\bootmgfw.efi"
-        $Macrium_WinPE_BootFile = "$InstallDir\macrium\\WA11KFiles\media\EFI\Boot\bootx64.efi"
-
-        if ((Test-Path $Macrium_WinRE_BootMgr_File) -or (Test-Path $Macrium_WinPE_BootFile)) {
-            Print-Header 'Macrium Folders'
-        }
-
-        if (Test-Path $Macrium_WinRE_BootMgr_File) {
-            if ($Verbose -and (Test-Path $Macrium_WinPE_BootFile)) {
-                Validate-BootMgrFile -BootMgr_File $Macrium_WinRE_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
-            }
-            else {
-                Validate-BootMgrFile -BootMgr_File $Macrium_WinRE_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4 -SkipNewLine
-            }
-        }
-
-        if (Test-Path $Macrium_WinPE_BootFile) {
-            Validate-BootMgrFile -BootMgr_File $Macrium_WinPE_BootFile -Label 'Boot File' -Indent $Tab4 -SkipNewLine
-        }
-
-        try {
-            $HasleoVersion = [Version](Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" | where { $_.DisplayName -match 'Hasleo Backup Suite' }).DisplayVersion
-        }
-        catch {
-            $HasleoVersion = [Version]'0.0.0.0'
-        }
-
-        if ($HasleoVersion -lt [Version]'5.8.2.2') {
-            $Hasleo_StagedBootMgr_File = "$env:ProgramFiles\Hasleo\Hasleo Backup Suite\bin\WADK\Boot\EFI_EX\bootmgfw.efi"
-
-            if (Test-Path $Hasleo_StagedBootMgr_File) {
-                Print-Header 'Hasleo Folder'
-                Validate-BootMgrFile -BootMgr_File $Hasleo_StagedBootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4 -SkipNewLine
-            }
-        }
-
-        Check-BootMedia
-    }
-
     $CheckList = Audit-UEFI
 
     if ($Audit) {
-        if (-not $BootMedia) { '' }
         Print-Header -Bold 'AUDIT REPORT'
 
         if ($CheckList -ne $null) {
@@ -1800,7 +1568,6 @@ $ScriptBlock = {
     }
 
     if ($Unsafe_Model -and ($UpdateFlags -band 0x4)) {
-        if (-not $BootMedia) { '' }
         Print-Header 'STATUS REPORT'
 
         try {
@@ -1838,7 +1605,6 @@ $ScriptBlock = {
 
         Run-FiniteStateMachine
 
-        if (-not $BootMedia) { '' }
         Print-Header -Bold 'REQUIRED ACTION'
 
         if (('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) -and ('Windows UEFI CA 2023' -in $db_Certs)) {
@@ -1925,7 +1691,6 @@ $ScriptBlock = {
         }
     }
     else {
-        if (-not $BootMedia) { '' }
         Print-Header 'STATUS REPORT'
 
         try {
@@ -1937,10 +1702,13 @@ $ScriptBlock = {
 
         "{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked." -f $Tab4, $Tab4
     }
+
+    if ($BootMedia) {
+        "`nINFO: -BootMedia checks have moved to new script 'Check_BootMedia.ps1'."
+    }
 }
 
 if ($Log) {
-    $System = Get-CimInstance -ClassName Win32_ComputerSystem
     $LogFile = '{0}\{1} {2} Check-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
     & $ScriptBlock | Tee-Object $LogFile
