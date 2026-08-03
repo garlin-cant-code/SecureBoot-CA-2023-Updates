@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.07.28
+.VERSION 2026.08.03
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -95,7 +95,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.07.28'
+$ScriptVersion = '2026.08.03'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -105,6 +105,7 @@ $EFI_WDSMGR_SVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 $VMWARE_GUID = 'a3d5e95b-0a8f-4753-8735-445afb708f62'
 
 $CN_Regex = '(CN=)([^,]+)'
+
 $Tab4 = ' ' * 4
 
 $Arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
@@ -153,6 +154,9 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
     exit 0
 }
+
+$System = Get-CimInstance -ClassName Win32_ComputerSystem
+$SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
@@ -796,25 +800,6 @@ function Match-DBXSignatureData {
     }
 }
 
-function Get-SkuSiPolicyVersion {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory)]
-        [String]$BinaryFilePath
-    )
-
-    $Bytes = [IO.File]::ReadAllBytes($BinaryFilePath)
-
-    if ([System.Text.Encoding]::ASCII.GetString($bytes) -replace "`0" -match '\d+(\.\d+)+') {
-        $Version = $Matches[0]
-    }
-    else {
-        $Version = $null
-    }
-
-    return $Version
-}
-
 function Get-SbatLevel {
     try {
         $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction Stop)
@@ -835,6 +820,25 @@ function Get-SbatLevel {
     }
 
     return $SbatLevel
+}
+
+function Get-SkuSiPolicyVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [String]$BinaryFilePath
+    )
+
+    $Bytes = [IO.File]::ReadAllBytes($BinaryFilePath)
+
+    if ([System.Text.Encoding]::ASCII.GetString($bytes) -replace "`0" -match '\d+(\.\d+)+') {
+        $Version = $Matches[0]
+    }
+    else {
+        $Version = $null
+    }
+
+    return $Version
 }
 
 function Audit-UEFI {
@@ -1209,6 +1213,8 @@ function Update-KEK_Cert {
             Copy-Item -Path $PreSignedObj_File -Destination "$EFI_FolderPath\$($CertFile -replace '\.der','.cer')" -Force
             Copy-Item -Path $PreSignedObj_File -Destination "$EFI_FolderPath\$($CertFile -replace '\.der','.crt')" -Force
 
+            Suspend-Protection
+
             Remove-Item $PreSignedObj_File -Force
         }
 
@@ -1272,10 +1278,7 @@ function Update-EFI_BootManager {
 }
 
 $ScriptBlock = {
-    $System = Get-CimInstance -ClassName Win32_ComputerSystem
-
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
-    $SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
     $Result = Confirm-MinimumUBR
 
     if ($Result -ne $true) {
@@ -1819,7 +1822,6 @@ $ScriptBlock = {
 }
 
 if ($Force -or $Log) {
-    $System = Get-CimInstance -ClassName Win32_ComputerSystem
     $LogFile = '{0}\{1} {2} Update-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
     & $ScriptBlock | Tee-Object $LogFile

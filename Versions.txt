@@ -1,8 +1,11 @@
+Run ".\Check_BootMedia.ps1 -version"
+    Check_BootMedia.ps1 version (2026.08.03)
+
 Run ".\Check_DBXUpdate.bin.ps1 -version"
-    Check_DBXUpdate.bin.ps1 version (2026.07.28)
+    Check_DBXUpdate.bin.ps1 version (2026.08.03)
 
 Run ".\Check_UEFI-CA2023.ps1 -version"
-    Check_UEFI-CA2023.ps1 version (2026.07.28)
+    Check_UEFI-CA2023.ps1 version (2026.08.03)
 
 Run ".\Update_UEFI-CA2023.ps1 -version"
-    Update_UEFI-CA2023.ps1 version (2026.07.28)
+    Update_UEFI-CA2023.ps1 version (2026.08.03)
