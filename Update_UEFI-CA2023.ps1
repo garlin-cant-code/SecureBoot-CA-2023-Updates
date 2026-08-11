@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.03
+.VERSION 2026.08.11
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -34,6 +34,10 @@
     Identify all required actions to bring system into compliance for upcoming Windows CA 2023 changes.
 
     If Secure Boot is currently disabled, audit report will simulate conditions where Secure Boot is enabled.
+
+.PARAMETER Force
+    Ignore the safety blocks for ConfidenceLevel = "Temporarily Paused" or "Not Supported", or when your PC matches a list of models with known problems.
+    A BIOS could be corrupted or damaged in certain cases by proceeding.  Not recommended for general use.
 
 .PARAMETER Revoke
     Revoke [Microsoft Windows Production PCA 2011] certificate by adding the cert to the UEFI DBX.
@@ -71,10 +75,10 @@ param (
     [string]$UpdatesFolder = $(if ([Environment]::Is64BitProcess) { "$env:SystemRoot\System32\SecureBootUpdates" } else { "$env:SystemRoot\SysNative\SecureBootUpdates" }),
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Force,
+    [switch]$Audit,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Audit,
+    [switch]$Force,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Revoke,
@@ -95,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.03'
+$ScriptVersion = '2026.08.11'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -118,7 +122,7 @@ switch ($Arch) {
 }
 
 $EDK2_Version = 'v1.6.5'
-$EDK2bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/$EDK2_Version/edk2-${EDK2_Arch}-secureboot-binaries.zip"
+$EDK2_bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/$EDK2_Version/edk2-${EDK2_Arch}-secureboot-binaries.zip"
 $PK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/PK/Certificate/WindowsOEMDevicesPK.der'
 
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
@@ -145,7 +149,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         $PS = 'powershell'
     }
 
-    $args = ($MyInvocation.BoundParameters.Keys.GetEnumerator() | where { $_ -notmatch 'UpdatesFolder|DBXupdate|ignored' } | foreach { '-{0}' -f $_ }) -join ' '
+    $args = ($MyInvocation.BoundParameters.Keys.GetEnumerator() | where { $_ -notmatch 'UpdatesFolder|ignored' } | foreach { '-{0}' -f $_ }) -join ' '
 
     if ($MyInvocation.BoundParameters.'UpdatesFolder' -ne $null) {
         $args += ' -UpdatesFolder "{0}"' -f (Get-Item $MyInvocation.BoundParameters.'UpdatesFolder' -ErrorAction SilentlyContinue).FullName
@@ -853,6 +857,18 @@ function Audit-UEFI {
         }
     }
 
+    try {
+        $State = (Get-ScheduledTask -TaskName 'Secure-Boot-Update' -ErrorAction Stop).State
+        $SecureBoot_TaskState = $State.ToString().ToUpper()
+    }
+    catch {
+        $SecureBoot_TaskState = 'REMOVED'
+    }
+
+    if ($SecureBoot_TaskState -ne 'Ready') {
+        $CheckList += "{0,-3} 'Secure-Boot-Update' scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
+    }
+
     if ($PK_Untrusted) {
         $CheckList += "{0,-3} [{1}] is UNTRUSTED`n" -f ('{0}.' -f $index++), $PK_Cert
     }
@@ -926,8 +942,8 @@ function Download-EDK2bin {
     }
 
     try {
-        'Downloading "{0}" from GitHub.' -f ($EDK2bin_URL -split '/')[-1]
-        Invoke-WebRequest -UseBasicParsing -Uri $EDK2bin_URL -OutFile $ZIP_File
+        'Downloading "{0}" from GitHub.' -f ($EDK2_bin_URL -split '/')[-1]
+        Invoke-WebRequest -UseBasicParsing -Uri $EDK2_bin_URL -OutFile $ZIP_File
     }
     catch {
         $_.Exception.Message
@@ -1274,6 +1290,123 @@ function Update-EFI_BootManager {
         }
 
         $null = New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'Enable_WinRE' -Value 'conhost --headless C:\Windows\System32\reagentc.exe /enable' -Force
+    }
+}
+
+function Update-USB_Drive {
+    param (
+        [Parameter(Mandatory)]
+        [string]$DriveLetter
+    )
+
+    $Drive = $DriveLetter + ':'
+    $EFI_Path = '{0}\EFI' -f $Drive
+
+    $EFI_BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
+    $EFI_BootFile = "$EFI_Path\Boot\boot${EDK2_Arch}.efi"
+
+    if (-not (Test-Path $EFI_BootMgr_File) -and -not (Test-Path $EFI_BootFile)) {
+        continue
+    }
+
+    $Label = (Get-Volume -DriveLetter $DriveLetter).FileSystemLabel
+
+    foreach ($Boot_File in @($EFI_BootMgr_File, $EFI_BootFile)) {
+        if (Test-Path $Boot_File) {
+            $EFI_BootStl_File = "$EFI_Path\Microsoft\Boot\boot.stl"
+            $Invalid_BootStl = $false
+
+            if ((Get-ChildItem -Path "$Drive\sources\install.*" -ErrorAction SilentlyContinue) | where { $_.Name -match 'wim|esd|swm' }) {
+                if (Test-Path $EFI_BootStl_File) {
+                    $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
+
+                    if ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash) {
+                        $Invalid_BootStl = $true
+                    }
+                }
+                else {
+                    $Invalid_BootStl = $true
+                }
+            }
+
+            $FileVersion = Get-FileVersion $Boot_File
+
+            if ($FileVersion -eq '0.0') {
+                if ($Label -ne $null) {
+                    'Skipping THIRD-PARTY boot file on USB Drive {0} "{1}"' -f $Drive, $Label
+                }
+                else {
+                    'Skipping THIRD-PARTY boot file on USB Drive {0}' -f $Drive
+                }
+
+                if ($Invalid_BootStl) {
+                    "Copying $EFI_BootStl_File"
+                    Copy-Item $BootStl_File $EFI_BootStl_File -Force
+
+                    $script:Media_Updated = $true
+                }
+
+                break
+            }
+
+            $BootFile_Hash = (Get-FileHash $Boot_File).Hash
+
+            if ($Boot_File -eq $EFI_BootMgr_File) {
+                if ($BootFile_Hash -ne $BootMgrEX_File_Hash) {
+                    if ($Label -ne '') {
+                        'Updating WinRE boot media on USB Drive {0} "{1}"' -f $Drive, $Label
+                    }
+                    else {
+                        'Updating WinRE boot media on USB Drive {0}' -f $Drive
+                    }
+
+                    $BCD = "$EFI_Path\Microsoft\Boot\BCD"
+                    $Backup_BCD = "$env:TEMP\BCD.BAK"
+    
+                    try {
+                        Copy-Item $BCD $Backup_BCD -Force
+                        Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $Drive /f UEFI /bootex" -NoNewWindow -Wait
+                        Copy-Item $Backup_BCD $BCD -Force
+                        Remove-Item $Backup_BCD -Force
+                    }
+                    catch {
+                        $_.Exception.Message
+                        exit 1
+                    }
+
+                    $script:Media_Updated = $true
+                }
+            }
+            else {
+                if ($BootFile_Hash -ne $BootMgr_File_Hash) {
+                    if ($Label -ne '') {
+                        'Updating WinPE boot media on USB Drive {0} "{1}"' -f $Drive, $Label
+                    }
+                    else {
+                        'Updating WinPE boot media on USB Drive {0}' -f $Drive
+                    }
+
+                    try {
+                        Copy-Item $BootMgrEX_File $EFI_BootFile -Force
+                    }
+                    catch {
+                        $_.Exception.Message
+                        exit 1
+                    }
+    
+                    $script:Media_Updated = $true
+                }
+            }
+
+            if ($Invalid_BootStl) {
+                "Copying $EFI_BootStl_File"
+                Copy-Item $BootStl_File $EFI_BootStl_File -Force
+
+                $script:Media_Updated = $true
+            }
+
+            break
+        }
     }
 }
 
@@ -1647,7 +1780,18 @@ $ScriptBlock = {
 
     if ($AvailableUpdates -gt 0) {
         $null = Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name 'AvailableUpdates' -Value $AvailableUpdates
-        Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+
+        switch ($SecureBoot_TaskState) {
+            'DISABLED' {
+                "WARNING: 'Secure-Boot-Update' scheduled task is disabled.  Unable to apply `"AvailableUpdates`" = 0x{0:x}`n" -f $AvailableUpdates
+            }
+            'REMOVED' {
+                "WARNING: 'Secure-Boot-Update' scheduled task was removed.  Unable to apply `"AvailableUpdates`" = 0x{0:x}`n" -f $AvailableUpdates
+            }
+            default {
+                Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update'
+            }
+        }
     }
 
     if ($Latest) {
@@ -1664,7 +1808,14 @@ $ScriptBlock = {
         }
 
         if ($BootMedia) {
-            $RemovableDrives = Get-Volume | where { $_.DriveType -eq 'Removable' -and $_.DriveLetter -ne $null } | sort DriveLetter
+            $USB_DeviceIDs = @(((Get-PnpDevice -PresentOnly | where { $_.Service -eq 'USBSTOR' }).PNPDeviceID -split '\\')[2])
+            $MBR_Drives = @((Get-Partition | where { $_.MbrType }).DriveLetter)
+            
+            # Overlap of USB devices which are not Fixed Disk + MBR/FAT32 devices
+            $RemovableDrives = @(
+                @((Get-CimInstance -ClassName Win32_DiskDrive | where { $_.PNPDeviceID -match $USB_DeviceIDs } | Get-CimAssociatedInstance -ResultClass Win32_DiskPartition | Get-CimAssociatedInstance -ResultClass Win32_LogicalDisk).DeviceID.SubString(0,1)) + `
+                @((Get-Volume | where { $_.DriveLetter -in $MBR_Drives -and $_.FileSystemType -eq 'FAT32' }).DriveLetter)
+            ) | sort -Unique
 
             if ($RemovableDrives.Count -eq 0) {
                 "No USB removable media found.`n"
@@ -1673,113 +1824,8 @@ $ScriptBlock = {
                 $BootStl_File = "$env:SystemRoot\Boot\EFI\boot.stl"
                 $BootStl_File_Hash = (Get-FileHash $BootStl_File).Hash
 
-                foreach ($Volume in $RemovableDrives) {
-                    $DriveLetter = $Volume.DriveLetter + ':'
-                    $EFI_Path = '{0}\EFI' -f $DriveLetter
-
-                    $EFI_BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
-                    $EFI_BootFile = "$EFI_Path\Boot\boot${EDK2_Arch}.efi"
-
-                    $EFI_BootStl_File = "$DriveLetter\EFI\Microsoft\Boot\boot.stl"
-
-                    if (-not (Test-Path $EFI_BootMgr_File) -and -not (Test-Path $EFI_BootFile)) {
-                        continue
-                    }
-
-                    $Label = $Volume.FileSystemLabel
-
-                    if (Test-Path $EFI_BootMgr_File) {
-                        $Version = Get-FileVersion $EFI_BootMgr_File
-
-                        if ($Version -eq '0.0') {
-                            if ($Label -ne $null) {
-                                'Skipping Third-Party boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
-                            }
-                            else {
-                                'Skipping Third-Party boot media on USB Drive {0}' -f $DriveLetter
-                            }
-
-                            continue
-                        }
-
-                        $EFI_BootMgr_File_Hash = (Get-FileHash $EFI_BootMgr_File).Hash
-
-                        if (Test-Path $EFI_BootStl_File) {
-                            $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
-                        }
-
-                        if (($EFI_BootMgr_File_Hash -ne $BootMgrEX_File_Hash) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
-                            $BCD = "$EFI_Path\Microsoft\Boot\BCD"
-                            $Backup_BCD = "$env:TEMP\BCD.BAK"
-
-                            try {
-                                if ($Label -ne '') {
-                                    'Updating WinRE boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
-                                }
-                                else {
-                                    'Updating WinRE boot media on USB Drive {0}' -f $DriveLetter
-                                }
-
-                                Copy-Item $BCD $Backup_BCD -Force
-                                Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
-                                Copy-Item $Backup_BCD $BCD -Force
-                                Remove-Item $Backup_BCD -Force
-                            }
-                            catch {
-                                $_.Exception.Message
-                                exit 1
-                            }
-
-                            if (-not (Test-Path $EFI_BootStl_File) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
-                                Copy-Item $BootStl_File $EFI_BootStl_File -Force
-                            }
-                        }
-                    }
-                    else {
-                        $Version = Get-FileVersion $EFI_BootFile
-
-                        if ($Version -eq '0.0') {
-                            if ($Label -ne $null) {
-                                'Skipping Third-Party boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
-                            }
-                            else {
-                                'Skipping Third-Party boot media on USB Drive {0}' -f $DriveLetter
-                            }
-
-                            continue
-                        }
-
-                        $EFI_BootFile_File_Hash = (Get-FileHash $EFI_BootFile).Hash
-
-                        if (Test-Path $EFI_BootStl_File) {
-                            $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
-                        }
-
-                        if (($EFI_BootFile_File_Hash -ne $BootMgrEX_File_Hash) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
-                            $Label = (Get-Volume -DriveLetter $Volume.DriveLetter).FileSystemLabel
-
-                            if ($Label -ne '') {
-                                'Updating WinPE boot media on USB Drive {0} "{1}"' -f $DriveLetter, $Label
-                            }
-                            else {
-                                'Updating WinPE boot media on USB Drive {0}' -f $DriveLetter
-                            }
-
-                            try {
-                                Copy-Item $BootMgrEX_File $EFI_BootFile -Force
-                            }
-                            catch {
-                                $_.Exception.Message
-                                exit 1
-                            }
-
-                            if (-not (Test-Path $EFI_BootStl_File) -or ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash)) {
-                                Copy-Item $BootStl_File $EFI_BootStl_File -Force
-                            }
-
-                            $Media_Updated = $true
-                        }
-                    }
+                foreach ($Drive in $RemovableDrives) {
+                    Update-USB_Drive $Drive
                 }
 
                 if ($Media_Updated) { '' }

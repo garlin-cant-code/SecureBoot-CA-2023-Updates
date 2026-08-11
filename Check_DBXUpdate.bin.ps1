@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.08.03
+$VERSION 2026.08.11
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -52,14 +52,14 @@ param (
     [Parameter(Mandatory=$false,ParameterSetName='Version')]
     [switch]$Version,
 
-    [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
-    [string[]]$Paths = @(),
-
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Log
+    [switch]$Log,
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
+    [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.03'
+$ScriptVersion = '2026.08.11'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -698,6 +698,8 @@ if (Test-Path $LogFile) {
     Remove-Item $LogFile -Force
 }
 
+$Paths = $Paths -notmatch '^-'
+
 if ($Paths.Count -eq 0) {
     if ([Environment]::Is64BitProcess) {
         $Paths = @("$env:SystemRoot\System32\SecureBootUpdates")
@@ -735,6 +737,14 @@ $DBX_Files = @()
 $SortKey = 0
 
 foreach ($item in $Paths) {
+    try {
+        $null = Get-Item $item -ErrorAction Stop
+    }
+    catch {
+        'Skipping file or folder path: "{0}"' -f $item
+        continue
+    }
+
     if ($item -match '^\.') {
         $Path = Resolve-Path $item -Relative
 
