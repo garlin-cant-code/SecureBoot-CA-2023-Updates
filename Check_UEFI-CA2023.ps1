@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.03
+.VERSION 2026.08.11
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -40,6 +40,9 @@
 .PARAMETER Log
     Save script output to a file named "YYYY-MM-DD [Model] Check UEFI.log"
 
+.PARAMETER BootMedia
+    Boot media checks have been moved to another script "Check_BootMedia.ps1".  User will be reminded to use the other script.
+
 .EXAMPLE
     Check_UEFI-CA2023.ps1
 .EXAMPLE
@@ -57,16 +60,16 @@ param (
     [switch]$Audit,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$BootMedia,
+    [switch]$Log,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Log,
+    [switch]$BootMedia,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.03'
+$ScriptVersion = '2026.08.11'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -933,15 +936,15 @@ function Validate-BootMgrFile
     }
 
     if ($Verbose) {
-        $Version = Get-FileVersion $BootMgr_File
+        $FileVersion = Get-FileVersion $BootMgr_File
         $Indent += $Tab4
 
-        if ($Version -ne '0.0') {
+        if ($FileVersion -ne '0.0') {
             if ($BootMgrSVN -ne $null) {
-                "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, $Version, $BootMgrSVN
+                "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, $FileVersion, $BootMgrSVN
             }
             else {
-                "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, $Version
+                "{0}{1}`n{2}File Version: {3}`n" -f $Indent, $BootMgr_File, $Indent, $FileVersion
             }
         }
         else {
@@ -982,6 +985,10 @@ function Audit-UEFI {
     if ($Result -ne $true) {
         $CheckList += "{0,-3} {1}`n" -f ('{0}.' -f $index++), $Result
         $NotMinimumUBR = $true
+    }
+
+    if ($SecureBoot_TaskState) {
+        $CheckList += "{0,-3} 'Secure-Boot-Update' scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
     }
 
     if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
@@ -1144,7 +1151,20 @@ $ScriptBlock = {
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
 
     # Force a refresh of reg key 'WindowsUEFICA2023Capable'
-    Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"
+    try {
+        Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update' -ErrorAction Stop
+    }
+    catch {
+        switch -Regex ($_.Exception.Message) {
+            'disabled.'   { $SecureBoot_TaskState = 'DISABLED' }
+            'cannot find' { $SecureBoot_TaskState = 'REMOVED' }
+
+            default {
+                $_.Exception.Message
+                exit 1
+            }
+        }
+    }
 
     if ($Verbose) {
         $CurrentBuild = $CurrentVersion.CurrentBuildNumber
@@ -1530,12 +1550,12 @@ $ScriptBlock = {
             }
             else {
                 if ($Verbose) {
-                    "`n{0}SkuSiPolicy.p7b Version: {1} is WRONG VERSION." -f $Tab4, $EFI_SkuSiPolicyVersion
+                    "`n{0}SkuSiPolicy.p7b is WRONG VERSION." -f $Tab4
                     "{0}{1}`n{2}Version: {3}" -f $Tab8, $EFI_SkuSiPolicy_File, $Tab8, $EFI_SkuSiPolicyVersion
                 }
                 else {
-                }
                     "`n{0}SkuSiPolicy.p7b is WRONG VERSION." -f $Tab4
+                }
             }
         }
         else {
@@ -1692,6 +1712,10 @@ $ScriptBlock = {
     }
     else {
         Print-Header 'STATUS REPORT'
+
+        if ($SecureBoot_TaskState) {
+            "{0}Scheduled Task: 'Secure-Boot-Update' is {1}`n" -f $Tab4, $SecureBoot_TaskState
+        }
 
         try {
             $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'UEFICA2023Status'

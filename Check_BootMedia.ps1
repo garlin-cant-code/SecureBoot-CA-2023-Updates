@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.03
+.VERSION 2026.08.11
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -8,7 +8,7 @@
 
 .COPYRIGHT
 
-.TAGS UEFI, Secure Boot, CA 2023, KEK, DB, DBX, SVN, Windows Boot Manager
+.TAGS UEFI, Secure Boot, CA 2023, KEK, DB, DBX, SVN, Windows Boot Manager, WinRE
 
 .RELEASENOTES
 
@@ -16,31 +16,48 @@
 
 <#
 .SYNOPSIS
-    Script to identify Secure Boot certificates installed in the UEFI variables, and signing certs for Windows boot files.
+    Script to identify Secure Boot compliance with Windows Boot Manager and other boot files located on USB boot media,
+    and individual WIM or ISO files.
 
 .DESCRIPTION
-    Run this script to check Windows compliance with Secure Boot CA 2023 updates, and CA 2011 revocation.
+    Run this script to check boot media, WIM or ISO file's compliance with Secure Boot CA 2023 updates, and CA 2011 revocation.
 
 .PARAMETER Version
     Print the script's version number and exit.
 
 .PARAMETER Verbose
-    Identify extra details including the Windows build version.  Windows Boot Manager SVN will be reported, if present in DBX.
+    Identify extra details including the Windows Boot Manager file version and SVN, winload.efi file version, and
+    current SkuSiPolicy rules (if file deployed to the EFI volume).
+
+.PARAMETER Quiet
+    Remove all reporting tags for "is ALLOWED", and only display "is BANNED" for quicker review.
 
 .PARAMETER Audit
-    If Secure Boot is currently disabled, report will simulate conditions where Secure Boot is enabled.
+    If Secure Boot or VBS are currently disabled, report will simulate conditions where Secure Boot and VBS are enabled.
 
 .PARAMETER NoSkip
-    When checking Windows install files on removable media, examine every image in the install WIM/ESD file.
-    By default, -BootMedia parameter stops checking after the first image in the install file to improve script reporting time.
+    When checking Windows install files, examine every image in the WIM/ESD file.  By default, the script stops checking after
+    the first image of each install file to improve script reporting times.
 
 .PARAMETER Log
-    Save script output to a file named "YYYY-MM-DD [Model] Check UEFI.log"
+    Save script output to a file named "YYYY-MM-DD [Model] Check BootMedia.log"
+
+.PARAMETER WinRE
+    Check the system's active Windows Recovery image (Winre.wim) and exit.
+
+.PARAMETER Paths
+    Check an optional list of WIM or ISO files submitted on the command line.  When this option is used, checking for removable drives
+    will be skipped.
 
 .EXAMPLE
     Check_BootMedia.ps1
 .EXAMPLE
+    Check_BootMedia.ps1 \path\boot.wim \path\Windows.iso
+.EXAMPLE
+    Check_BootMedia.ps1 -WinRE
+.EXAMPLE
     Check_BootMedia.ps1 -Verbose
+.EXAMPLE
     Check_BootMedia.ps1 -Verbose -Audit -Log
 #>
 
@@ -50,21 +67,28 @@ param (
     [switch]$Version,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [switch]$Quiet,
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Audit,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$NoSkip,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
-    [switch]$Log
+    [switch]$Log,
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [switch]$WinRE,
+
+    [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
+    [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.03'
+$ScriptVersion = '2026.08.11'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
-$EFI_CDBOOT_SVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
-$EFI_WDSMGR_SVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 
 $CN_Regex = '(CN=)([^,]+)'
 
@@ -108,7 +132,11 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         $PS = 'powershell'
     }
 
-    $args = ($MyInvocation.BoundParameters.Keys.GetEnumerator() | where { $_ -notmatch 'ignored' } | foreach { '-{0}' -f $_ }) -join ' '
+    $args = ($MyInvocation.BoundParameters.Keys.GetEnumerator() | where { $_ -ne 'Paths' } | foreach { '-{0}' -f $_ }) -join ' '
+
+    if ($MyInvocation.BoundParameters.'Paths' -ne $null) {
+        $args += ' ' + ($MyInvocation.BoundParameters.'Paths' | foreach { '"{0}"' -f (Get-Item $_ -ErrorAction SilentlyContinue).FullName }) -join ' '
+    }
 
     Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
     exit 0
@@ -117,6 +145,10 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if ($PSBoundParameters['Verbose']) {
     $Verbose = $true
     $VerbosePreference = 'SilentlyContinue'
+}
+
+if ($Quiet) {
+    $Verbose = $false
 }
 
 if ([Environment]::Is64BitProcess) {
@@ -1556,6 +1588,7 @@ function Validate-BootMgrFile
         [string]$ShowAsFile,
 
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string]$Indent,
 
         [Parameter(Mandatory=$false)]
@@ -1563,6 +1596,7 @@ function Validate-BootMgrFile
     )
 
     $PFXCert = Get-PFXCert $BootMgr_File
+    $FileVersion = Get-FileVersion $BootMgr_File
     $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
 
     switch -Regex (Validate-PFXCert $PFXCert) {
@@ -1571,8 +1605,14 @@ function Validate-BootMgrFile
         }
 
         'ALLOWED' {
-            if (-not $SecureBoot -or $BootMgrSVN -ge $UEFI_SVN) {
-                '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $SecureBoot_Verb
+            # Check for 3rd-party boot loaders (SVN 0.0)
+            if (-not $SecureBoot -or ($FileVersion -eq '0.0') -or ($BootMgrSVN -ge $UEFI_SVN)) {
+                if ($Quiet) {
+                    '{0}{1} [{2}]' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows ')
+                }
+                else {
+                    '{0}{1} [{2}] {3} ALLOWED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $SecureBoot_Verb
+                }
             }
             else {
                 '{0}{1} [{2}] {3} BANNED.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $SecureBoot_Verb
@@ -1581,7 +1621,6 @@ function Validate-BootMgrFile
     }
 
     if ($Verbose) {
-        $Version = Get-FileVersion $BootMgr_File
         $Indent += $Tab4
 
         if ($ShowAsFile) {
@@ -1595,12 +1634,12 @@ function Validate-BootMgrFile
             $NewLine = "`n"
         }
 
-        if ($Version -ne '0.0') {
+        if ($FileVersion -ne '0.0') {
             if ($BootMgrSVN -ne $null) {
-                "{0}{1}`n{2}File Version: {3}, SVN {4}{5}" -f $Indent, $BootMgr_File, $Indent, $Version, $BootMgrSVN, $NewLine
+                "{0}{1}`n{2}File Version: {3}, SVN {4}{5}" -f $Indent, $BootMgr_File, $Indent, $FileVersion, $BootMgrSVN, $NewLine
             }
             else {
-                "{0}{1}`n{2}File Version: {3}{4}" -f $Indent, $BootMgr_File, $Indent, $Version, $NewLine
+                "{0}{1}`n{2}File Version: {3}{4}" -f $Indent, $BootMgr_File, $Indent, $FileVersion, $NewLine
             }
         }
         else {
@@ -1650,7 +1689,7 @@ function Validate-BootStl {
     $EFI_BootStl_File = "$env:SystemRoot\Boot\EFI\boot.stl"
 
     if (-not (Test-Path $BootStl_File)) {
-        '{0}{1} is MISSING.' -f $Tab8, $BootStl_File
+        "{0}{1} is MISSING.`n" -f $Tab8, $BootStl_File
     }
     else {
         $EFI_BootStl_File_Hash = (Get-FileHash $EFI_BootStl_File).Hash
@@ -1669,10 +1708,10 @@ function Validate-BootStl {
         }
 
         if ($EFI_BootStl_File_Hash -ne $BootStl_File_Hash) {
-            '{0}{1}{2} is WRONG VERSION.' -f $Tab4, $BootStl_File, $Update
+            "{0}{1}{2} is WRONG VERSION.`n" -f $Tab4, $BootStl_File, $Update
         }
         else {
-            '{0}{1}{2} is CURRENT.' -f $Tab4, $BootStl_File, $Update
+            "{0}{1}{2} is CURRENT.`n" -f $Tab4, $BootStl_File, $Update
         }
     }
 }
@@ -1686,7 +1725,7 @@ function Check-CacheFolders {
     }
 
     $Macrium_WinRE_BootMgr_File = "$InstallDir\macrium\WinREFiles\media\EFI\Microsoft\Boot\bootmgfw.efi"
-    $Macrium_WinPE_BootFile = "$InstallDir\macrium\\WA11KFiles\media\EFI\Boot\bootx64.efi"
+    $Macrium_WinPE_BootFile = "$InstallDir\macrium\WA11KFiles\media\EFI\Boot\bootx64.efi"
 
     if ((Test-Path $Macrium_WinRE_BootMgr_File) -or (Test-Path $Macrium_WinPE_BootFile)) {
         try {
@@ -1711,19 +1750,26 @@ function Check-CacheFolders {
         Validate-BootMgrFile -BootMgr_File $Macrium_WinPE_BootFile -Label 'WinPE Boot File' -Indent $Tab4 -SkipNewLine
     }
 
-    try {
-        $DisplayVersion = [Version](Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" | where { $_.DisplayName -match 'Hasleo Backup Suite' }).DisplayVersion
-        $Version = $DisplayVersion
-    }
-    catch {
-        $Version = '0.0.0.0'
-    }
+    $Hasleo_WinPE_WIM = "$env:ProgramFiles\Hasleo\Hasleo Backup Suite\bin\WADK\Windows Preinstallation Environment\amd64\winpe.wim"
+    $Hasleo_StagedBootMgr_File = "$env:ProgramFiles\Hasleo\Hasleo Backup Suite\bin\WADK\Boot\EFI_EX\bootmgfw.efi"
 
-    if ([version]$Version -lt [Version]'5.8.2.2') {
-        $Hasleo_StagedBootMgr_File = "$env:ProgramFiles\Hasleo\Hasleo Backup Suite\bin\WADK\Boot\EFI_EX\bootmgfw.efi"
+    if ((Test-Path $Hasleo_WinPE_WIM) -or (Test-Path $Hasleo_StagedBootMgr_File)) {
+        try {
+            $Version = [Version](Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" | where { $_.DisplayName -match 'Hasleo Backup Suite' }).DisplayVersion
+            Print-Header "Hasleo $Version"
+        }
+        catch {
+            Print-Header 'Hasleo Folders'
+        }
+
+        if (Test-Path $Hasleo_WinPE_WIM) {
+            Check-WIM_File -WIM_File $Hasleo_WinPE_WIM -Index 1 -ShowPath -Indent -SkipNewLine
+            $Token = $true
+        }
 
         if (Test-Path $Hasleo_StagedBootMgr_File) {
-            Print-Header "Hasleo $DisplayVersion"
+            if ($Token) { Write-Output '' }
+
             Validate-BootMgrFile -BootMgr_File $Hasleo_StagedBootMgr_File -Label 'WinPE Boot Manager' -Indent $Tab4 -SkipNewLine
         }
     }
@@ -1738,7 +1784,13 @@ function Check-WIM_File {
         [int]$Index,
 
         [Parameter(Mandatory=$false)]
-        [switch]$ShowPath
+        [switch]$ShowPath,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$Indent,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$SkipNewLine
     )
 
     $Extract_Files = '/Windows/Boot/EFI/bootmgfw.efi /Windows/Boot/EFI_EX/bootmgfw_EX.efi /Windows/System32/config/SOFTWARE /Windows/System32/winload.efi'
@@ -1751,37 +1803,35 @@ function Check-WIM_File {
 
         try {
             $null = Export-WindowsImage -SourceImagePath $WIM_File -SplitImageFilePattern "$SWM_Path\install*.swm" -SourceIndex 1 -DestinationImagePath $Temp_WIM
+            Start-Sleep 2
         }
         catch {
             $_.Exception.Message
             exit 1
         }
 
-        Start-Sleep 2
-
-        $Extract_Files = $Extract_Files -replace '/Windows','Windows' -replace '/','\'
         Start-Process $7z_exe -ArgumentList "e $Temp_WIM -aoa $Extract_Files -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
         Remove-Item $Temp_WIM -Force
     }
     else {
-        $ArgumentList = "extract $WIM_File $Index $Extract_Files --quiet --nullglob --no-acls --dest-dir=`"$env:TEMP`""
-    }
+        $ArgumentList = "extract `"$WIM_File`" $Index $Extract_Files --quiet --nullglob --no-acls --dest-dir=`"$env:TEMP`""
 
-    try {
-        Start-Process $wimlib_imagex -ArgumentList $ArgumentList -NoNewWindow -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -Wait
-
-        if ($WIM_File -match 'boot.wim') {
-            if ((& $wimlib_imagex dir $WIM_File $Index -path=/Windows/System32) -match 'MXEAgent.dll') {
-                $WIM_Type = 'WinRE'
-            }
-            else {
-                $WIM_Type = 'WinPE'
-            }
+        try {
+            Start-Process $wimlib_imagex -ArgumentList $ArgumentList -NoNewWindow -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -Wait
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
         }
     }
-    catch {
-        "ERROR: wimlib unable to open $WIM_File"
-        return
+
+    if ($WIM_File -match '(boot|winpe).wim') {
+        if ((& $wimlib_imagex dir $WIM_File $Index -path=/Windows/System32) -match 'MXEAgent.dll') {
+            $WIM_Type = 'WinRE'
+        }
+        else {
+            $WIM_Type = 'WinPE'
+        }
     }
 
     $Hive = "$env:TEMP\SOFTWARE"
@@ -1792,9 +1842,10 @@ function Check-WIM_File {
     $DisplayVersion = (($CurrentVersion | Select-String '"DisplayVersion"') -split '"')[3]
 
     switch ($Build) {
-        { $_ -ge 19041 -and $_ -le 19045 } {
-            $Release = "W10 $DisplayVersion"
-        }
+        19041 { $Release = "W10 20H1" }
+        19042 { $Release = "W10 20H2" }
+        19043 { $Release = "W10 21H2" }
+        19044 { $Release = "W10 22H2" }
 
         { $_ -ge 22000 } {
             $Release = "W11 $DisplayVersion"
@@ -1815,18 +1866,33 @@ function Check-WIM_File {
         $Filename = Split-Path $WIM_File -Leaf
     }
 
-    if ($WIM_Type -match 'Win') {
-        '{0}{1}:{2} ({3} {4}.{5}) ' -f $Tab4, $Filename, $Index, $WIM_Type, $Build, $UBR
+    if ($Indent) {
+        $BaseOffset = $Tab4
+    }
+
+    if ($ShowPath) {
+        if (-not $SkipNewLine) { Write-Output '' }
+
+        $Indent1 = $BaseOffset
+        $Indent2 = $BaseOffset + $Tab4
     }
     else {
-        '{0}{1}:{2} ({3} {4}.{5}) ' -f $Tab4, $Filename, $Index, $Release, $Build, $UBR
+        $Indent1 = $BaseOffset + $Tab4
+        $Indent2 = $BaseOffset + $Tab8
+    }
+
+    if ($WIM_Type -match 'Win') {
+        '{0}{1}:{2} ({3} {4}.{5}) ' -f $Indent1, $Filename, $Index, $WIM_Type, $Build, $UBR
+    }
+    else {
+        '{0}{1}:{2} ({3} {4}.{5}) ' -f $Indent1, $Filename, $Index, $Release, $Build, $UBR
     }
 
     if (Test-Path $Temp_BootMgrEX_File) {
-        Validate-BootMgrFile -BootMgr_File $Temp_BootMgrEX_File -Label 'Boot Manager' -ShowAsFile '\Windows\Boot\EFI_EX\bootmgfw_EX.efi' -Indent $Tab8 -SkipNewLine
+        Validate-BootMgrFile -BootMgr_File $Temp_BootMgrEX_File -Label 'Boot Manager' -ShowAsFile '\Windows\Boot\EFI_EX\bootmgfw_EX.efi' -Indent $Indent2 -SkipNewLine
     }
     elseif (Test-Path $Temp_BootMgr_File) {
-        Validate-BootMgrFile -BootMgr_File $Temp_BootMgr_File -Label 'Boot Manager' -ShowAsFile '\Windows\Boot\EFI\bootmgfw.efi' -Indent $Tab8 -SkipNewLine
+        Validate-BootMgrFile -BootMgr_File $Temp_BootMgr_File -Label 'Boot Manager' -ShowAsFile '\Windows\Boot\EFI\bootmgfw.efi' -Indent $Indent2 -SkipNewLine
     }
     else {
         '{0}ERROR: No boot manager found in WIM.' -f $Tab8
@@ -1835,20 +1901,30 @@ function Check-WIM_File {
     $WinloadEFI_File = "$env:TEMP\winload.efi"
 
     if (Test-Path $WinloadEFI_File) {
-        $File = Get-Item $WinloadEFI_File
-        $FileVersion = [version]$File.VersionInfo.FileVersionRaw
-
+        $FileVersion = Get-FileVersion $WinloadEFI_File
         $Status = Validate-WinloadEFI_File $WinloadEFI_File
 
         if ($Verbose) {
-            "`n{0}\Windows\System32\winload.efi {1} {2}.`n{3}File Version: {4}" -f $Tab8, $VBS_Verb, $Status, $Tab12, $FileVersion
+            "`n{0}\Windows\System32\winload.efi {1} {2}.`n{3}File Version: {4}" -f $Indent2, $VBS_Verb, $Status, $($Indent2 + $Tab4), $FileVersion
         }
         else {
-            "{0}winload.efi {1} {2}.`n" -f $Tab8, $VBS_Verb, $Status
+            if ($Status -ne 'BANNED') {
+                if ($Quiet) {
+                    '{0}winload.efi ({1})' -f $Indent2, $FileVersion
+                }
+                else {
+                    '{0}winload.efi {1} ALLOWED' -f $Indent2, $VBS_Verb
+                }
+            }
+            else {
+                '{0}winload.efi {1} BANNED.' -f $Indent2, $VBS_Verb
+            }
+
+            if (-not $ShowPath) { Write-Output '' }
         }
     }
     else {
-        "ERROR: $WinloadEFI_File not found."
+        "{0}ERROR: No winload.efi found in WIM." -f $Tab8
     }
 
     foreach ($File in @($Hive, $Temp_BootMgrEX_File, $Temp_BootMgr_File, $WinloadEFI_File)) {
@@ -1859,24 +1935,33 @@ function Check-WIM_File {
 function Check-DriveVolume {
     param (
         [Parameter(Mandatory)]
-        [ref]$Volume,
+        [string]$DriveLetter,
 
         [Parameter(Mandatory=$false)]
         [switch]$ShowPath
     )
 
-    $DriveLetter = $Volume.Value.DriveLetter + ':'
+    try {
+        $DriveVolume = Get-Volume -DriveLetter $DriveLetter
+    }
+    catch {
+        $_.Exception.Message
+        return
+    }
 
-    $EFI_BootMgr_File = "$DriveLetter\EFI\Microsoft\Boot\bootmgfw.efi"
-    $EFI_BootFile = "$DriveLetter\EFI\Boot\boot${Arch}.efi"
+    $Drive = $DriveLetter + ':'
 
-    $Boot_WIM = "$DriveLetter\sources\boot.wim"
+    $Boot_WIM = "$Drive\sources\boot.wim"
     $WIM_Formats = @('wim','esd','swm')
 
-    $Label = $Volume.Value.FileSystemLabel
+    if (-not (Test-Path $Boot_WIM) -and -((Get-ChildItem -Path "$Drive\sources\install.*" -ErrorAction SilentlyContinue) | where { $_.Name -notmatch 'wim|esd|swm' })) {
+        return
+    }
+
+    $Label = $DriveVolume.FileSystemLabel
 
     if ($ShowPath) {
-        $ImagePath = (Get-Volume -DriveLetter $Volume.Value.DriveLetter | Get-DiskImage).ImagePath
+        $ImagePath = ($DriveVolume | Get-DiskImage).ImagePath
 
         if ($Label -ne '') {
             "`n{0} `"{1}`"" -f $ImagePath, $Label
@@ -1886,7 +1971,7 @@ function Check-DriveVolume {
         }
     }
     else {
-        if ($Volume.Value.DriveType -eq 'Removable') {
+        if ($DriveVolume.DriveType -eq 'Removable') {
             $DriveType = 'USB'
         }
         else {
@@ -1894,12 +1979,15 @@ function Check-DriveVolume {
         }
 
         if ($Label -ne '') {
-            "`n{0} Drive {1} `"{2}`"" -f $DriveType, $DriveLetter, $Label
+            "`n{0} Drive {1} `"{2}`"" -f $DriveType, $Drive, $Label
         }
         else {
-            "`n{0} Drive {1}" -f $DriveType, $DriveLetter
+            "`n{0} Drive {1}" -f $DriveType, $Drive
         }
     }
+
+    $EFI_BootMgr_File = "$Drive\EFI\Microsoft\Boot\bootmgfw.efi"
+    $EFI_BootFile = "$Drive\EFI\Boot\boot${Arch}.efi"
 
     if (Test-Path $EFI_BootMgr_File) {
         Validate-BootMgrFile -BootMgr_File $EFI_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
@@ -1932,12 +2020,14 @@ function Check-DriveVolume {
         if ($Verbose) { '' }
     }
 
-    $LineBreak = $true
-
     foreach ($Format in $WIM_Formats) {
-        $ImageFile = "$DriveLetter\sources\install.$Format"
+        $ImageFile = "$Drive\sources\install.$Format"
 
         if (Test-Path $ImageFile) {
+            if ($DriveType -eq 'USB') {
+                Validate-BootStl "$Drive\EFI\Microsoft\Boot\boot.stl"
+            }
+
             $ImageCount = (Get-WindowsImage -ImagePath $ImageFile).Count
 
             if ($NoSkip) {
@@ -1969,17 +2059,8 @@ function Check-DriveVolume {
                 }
             }
 
-            Write-Output ''
-            $LineBreak = $false
+            if (-not $ShowPath) { Write-Output '' }
         }
-    }
-
-    if ($DriveType -eq 'USB') {
-        Validate-BootStl "$DriveLetter\EFI\Microsoft\Boot\boot.stl"
-    }
-
-    if ($LineBreak) {
-        Write-Output ''
     }
 }
 
@@ -2171,7 +2252,7 @@ $ScriptBlock = {
                 }) | sort MinimumFileVersion
 
                 if ($Verbose) {
-                    ($FileRules | Out-String) -replace "`r`n$" -split "`r`n" | foreach { '{0}{1}' -f $Tab4, $_ }
+                    ($FileRules | Out-String) -replace "`r`n$" -split "`r`n" | foreach { '{0}{1}' -f $Tab8, $_ }
                 }
             }
             catch {
@@ -2194,21 +2275,139 @@ $ScriptBlock = {
         }
     }
 
-    Check-CacheFolders
+    if ($WinRE) {
+        $Reagent_XML = "$env:SystemRoot\System32\Recovery\ReAgent.xml"
+        [xml]$XML = Get-Content -Path $Reagent_XML
 
-    $RemovableDrives = Get-Volume | where { $_.DriveType -in 'CD-ROM','Removable' -and $_.DriveLetter -ne $null -and $_.OperationalStatus -eq 'OK' } | sort DriveLetter
+        $Partition = Get-Disk | where { $_.Guid -eq $XML.WindowsRE.WinreLocation.guid } | Get-Partition | where { $_.Offset -eq $XML.WindowsRE.WinreLocation.offset }
 
-    if ($RemovableDrives.Count) {
-        Print-Header 'Bootable Media'
+        if ($Partition.GUID -eq $null) {
+            $VolumePath = Get-HarddiskVolume (Get-Partition -DriveLetter $Volume.DriveLetter).Guid
+            $WIM_Filename = "$env:TEMP\Winre.wim"
 
-        foreach ($Volume in $RemovableDrives) {
-            Check-DriveVolume -Volume ([ref]$Volume)
+            try {
+                $null = New-Item -ItemType HardLink -Path $WIM_Filename -Target ('{0}:\Windows\System32\Recovery\Winre.wim' -f $Volume.DriveLetter) -Force
+            }
+            catch {
+                continue
+            }
+        }
+        else {
+            $VolumePath = Get-HarddiskVolume $Partition.GUID
+            $WIM_Filename = "$VolumePath\Recovery\WindowsRE\Winre.wim"
+
+            if (-not (Test-Path $WIM_Filename)) {
+               continue
+            }
+        }
+
+        Print-Header 'Windows Recovery'
+        Check-WIM_File -WIM_File $WIM_Filename -Index 1 -ShowPath -Indent -SkipNewLine
+
+        Write-Output ''
+        return
+    }
+
+    if ($Paths.Count) {
+        Print-Header 'Image Files'
+        $Token = $false
+
+        foreach ($File in $Paths) {
+            if ($File -match '^[A-Z]:$') {
+                $DriveLetter = $File -replace ':'
+
+                $Volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+
+                if ($Volume.Count) {
+                    Check-DriveVolume -DriveLetter $DriveLetter
+                }
+                else {
+                    "Skipping unmounted drive $File."
+                    $Token = $true
+                }
+
+                continue
+            }
+
+            try {
+                $FilePath = (Get-Item $File -ErrorAction Stop).FullName
+            }
+            catch {
+                "Skipping `"$File`": File not found."
+                continue
+            }
+
+            switch -Regex ($FilePath) {
+                '\.iso$' {
+                    if (-not (Get-DiskImage -ImagePath $FilePath).Attached) {
+                        try {
+                            $DriveLetter = (Mount-DiskImage -ImagePath $FilePath -PassThru | Get-Volume).DriveLetter
+                            Check-DriveVolume -DriveLetter $DriveLetter -ShowPath
+
+                            $null = Dismount-DiskImage -ImagePath $FilePath
+                        }
+                        catch {
+                            $_.Exception.Message
+                        }
+                    }
+                    else {
+                        $DriveLetter = ((Get-DiskImage -ImagePath $FilePath) | Get-Volume).DriveLetter
+                        Check-DriveVolume -DriveLetter $DriveLetter -ShowPath
+
+                        $Token = $false
+                    }
+                }
+
+                '\.(wim|esd|swm)$' {
+                    try {
+                        $Index = (Get-WindowsImage -ImagePath $FilePath -Name *Setup*).ImageIndex
+                    }
+                    catch {
+                        $ErrorMessage = $_.Exception.Message
+                    }
+
+                    if ($Index -eq $null) {
+                        $Index = 1
+                    }
+
+                    Check-WIM_File -WIM_File $FilePath -Index $Index -ShowPath
+                    $Token = $false
+                }
+
+                default {
+                    "Skipping file `"$FilePath`": wrong file type."
+                    $Token = $true
+                }
+            }
+
+            if (-not $Token) { Write-Output '' }
+        }
+    }
+    else {
+        Check-CacheFolders
+
+        $USB_DeviceIDs = @(((Get-PnpDevice -PresentOnly | where { $_.Service -eq 'USBSTOR' }).PNPDeviceID -split '\\')[2])
+        $MBR_Drives = @((Get-Partition | where { $_.MbrType }).DriveLetter)
+        
+        # Overlap of USB devices which are not Fixed Disk + mounted CDROM's + MBR/FAT32 devices
+        $RemovableDrives = @(
+            @((Get-CimInstance -ClassName Win32_DiskDrive | where { $_.PNPDeviceID -match $USB_DeviceIDs } | Get-CimAssociatedInstance -ResultClass Win32_DiskPartition | Get-CimAssociatedInstance -ResultClass Win32_LogicalDisk).DeviceID.SubString(0,1)) + `
+            @((Get-Volume | where { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter -match '[A-Z]' -and $_.OperationalStatus -eq 'OK' }).DriveLetter) + `
+            @((Get-Volume | where { $_.DriveLetter -in $MBR_Drives -and $_.FileSystemType -eq 'FAT32' }).DriveLetter)
+        ) | sort -Unique
+
+        if ($RemovableDrives.Count) {
+            Print-Header 'Bootable Media'
+
+            foreach ($Drive in $RemovableDrives) {
+                Check-DriveVolume -DriveLetter $Drive
+            }
         }
     }
 }
 
 if ($Log) {
-    $LogFile = '{0}\{1} {2} Check-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
+    $LogFile = '{0}\{1} {2} Check-BootMedia.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
     & $ScriptBlock | Tee-Object $LogFile
     "`nLog file saved as `"{0}`"`n" -f $LogFile
