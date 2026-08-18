@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.11
+.VERSION 2026.08.18
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -99,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.11'
+$ScriptVersion = '2026.08.18'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -866,7 +866,7 @@ function Audit-UEFI {
     }
 
     if ($SecureBoot_TaskState -ne 'Ready') {
-        $CheckList += "{0,-3} 'Secure-Boot-Update' scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
     }
 
     if ($PK_Untrusted) {
@@ -1300,6 +1300,13 @@ function Update-USB_Drive {
     )
 
     $Drive = $DriveLetter + ':'
+    $Label = (Get-Volume -DriveLetter $DriveLetter).FileSystemLabel
+
+    if (Test-Path "$Drive\ventoy") {
+        'Skipping USB Drive {0} "{1}"' -f $Drive, $Label
+        return
+    }
+
     $EFI_Path = '{0}\EFI' -f $Drive
 
     $EFI_BootMgr_File = "$EFI_Path\Microsoft\Boot\bootmgfw.efi"
@@ -1308,8 +1315,6 @@ function Update-USB_Drive {
     if (-not (Test-Path $EFI_BootMgr_File) -and -not (Test-Path $EFI_BootFile)) {
         continue
     }
-
-    $Label = (Get-Volume -DriveLetter $DriveLetter).FileSystemLabel
 
     foreach ($Boot_File in @($EFI_BootMgr_File, $EFI_BootFile)) {
         if (Test-Path $Boot_File) {
@@ -1362,7 +1367,7 @@ function Update-USB_Drive {
 
                     $BCD = "$EFI_Path\Microsoft\Boot\BCD"
                     $Backup_BCD = "$env:TEMP\BCD.BAK"
-    
+
                     try {
                         Copy-Item $BCD $Backup_BCD -Force
                         Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $Drive /f UEFI /bootex" -NoNewWindow -Wait
@@ -1393,7 +1398,7 @@ function Update-USB_Drive {
                         $_.Exception.Message
                         exit 1
                     }
-    
+
                     $script:Media_Updated = $true
                 }
             }
@@ -1783,10 +1788,10 @@ $ScriptBlock = {
 
         switch ($SecureBoot_TaskState) {
             'DISABLED' {
-                "WARNING: 'Secure-Boot-Update' scheduled task is disabled.  Unable to apply `"AvailableUpdates`" = 0x{0:x}`n" -f $AvailableUpdates
+                "WARNING: `"Secure-Boot-Update`" scheduled task is DISABLED.  Unable to apply `"AvailableUpdates`" = 0x{0:x}`n" -f $AvailableUpdates
             }
             'REMOVED' {
-                "WARNING: 'Secure-Boot-Update' scheduled task was removed.  Unable to apply `"AvailableUpdates`" = 0x{0:x}`n" -f $AvailableUpdates
+                "WARNING: `"Secure-Boot-Update`" scheduled task was REMOVED.  Unable to apply `"AvailableUpdates`" = 0x{0:x}`n" -f $AvailableUpdates
             }
             default {
                 Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update'
@@ -1808,14 +1813,7 @@ $ScriptBlock = {
         }
 
         if ($BootMedia) {
-            $USB_DeviceIDs = @(((Get-PnpDevice -PresentOnly | where { $_.Service -eq 'USBSTOR' }).PNPDeviceID -split '\\')[2])
-            $MBR_Drives = @((Get-Partition | where { $_.MbrType }).DriveLetter)
-            
-            # Overlap of USB devices which are not Fixed Disk + MBR/FAT32 devices
-            $RemovableDrives = @(
-                @((Get-CimInstance -ClassName Win32_DiskDrive | where { $_.PNPDeviceID -match $USB_DeviceIDs } | Get-CimAssociatedInstance -ResultClass Win32_DiskPartition | Get-CimAssociatedInstance -ResultClass Win32_LogicalDisk).DeviceID.SubString(0,1)) + `
-                @((Get-Volume | where { $_.DriveLetter -in $MBR_Drives -and $_.FileSystemType -eq 'FAT32' }).DriveLetter)
-            ) | sort -Unique
+            $RemovableDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Removable' -and $_.FileSystem -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.SubString(0,1) })
 
             if ($RemovableDrives.Count -eq 0) {
                 "No USB removable media found.`n"

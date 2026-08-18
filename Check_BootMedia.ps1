@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.11
+.VERSION 2026.08.18
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -85,7 +85,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.11'
+$ScriptVersion = '2026.08.18'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -99,6 +99,7 @@ $Tab12 = ' ' * 12
 $TEMP_DIR = "$env:TEMP"
 
 $wimlib_URL = 'https://wimlib.net/downloads/wimlib-1.14.5-windows-x86_64-bin.zip'
+$wimlib_BACKUP_URL = 'https://web.archive.org/web/20260204130551/https://wimlib.net/downloads/wimlib-1.14.5-windows-x86_64-bin.zip'
 
 $wimlib_imagex = "$TEMP_DIR\wimlib-imagex.exe"
 $wimlib_dll = "$TEMP_DIR\libwim-15.dll"
@@ -113,6 +114,8 @@ $offlinereg_URL = 'http://erwan.labalec.fr/offlinereg/offlinereg.zip'
 
 $offlinereg = "$env:TEMP\offlinereg-win32.exe"
 $offlinereg_dll = "$env:TEMP\offreg.dll"
+
+$WIM_Formats = @('wim','esd','swm')
 
 if ($Version) {
     '{0} version ({1}){2}' -f $MyInvocation.MyCommand.Name, $ScriptVersion, $(if ($MyInvocation.Line -ne '') { "`n" })
@@ -176,34 +179,42 @@ function Install-Tools {
     $objFolder = $objShell.NameSpace($env:TEMP)
 
     if (-not (Test-Path $wimlib_imagex -PathType Leaf) -or -not (Test-Path $wimlib_dll -PathType Leaf)) {
+        $ZIP_File = '{0}\{1}' -f $env:TEMP, ($wimlib_URL -split '/')[-1]
+
         try {
-            $ZIP_File = '{0}\{1}' -f $env:TEMP, ($wimlib_URL -split '/')[-1]
+            $Response = Invoke-WebRequest -UseBasicParsing -Uri $wimlib_URL -OutFile $ZIP_File -PassThru -ErrorAction Stop
+        }
+        catch {
+        }
 
-            Invoke-WebRequest -UseBasicParsing -Uri $wimlib_URL -OutFile $ZIP_File
+        if ($Response.StatusCode -ne 200) {
+            Invoke-WebRequest -UseBasicParsing -Uri $wimlib_BACKUP_URL -OutFile $ZIP_File
+        }
 
+        try {
             $objFolder.CopyHere("$($ZIP_File)\wimlib-imagex.exe", 0x14)
             $objFolder.CopyHere("$($ZIP_File)\libwim-15.dll", 0x14)
             $objFolder.CopyHere("$($ZIP_File)\COPYING.txt", 0x14)
             $objFolder.CopyHere("$($ZIP_File)\COPYING.GPLv3.txt", 0x14)
             $objFolder.CopyHere("$($ZIP_File)\COPYING.LGPL.txt", 0x14)
             $objFolder.CopyHere("$($ZIP_File)\COPYING.libdivsufsort-lite.txt", 0x14)
-
+        }
+        catch {
+        }
+        finally {
             Remove-Item $ZIP_File -Force
+        }
+    }
+
+    if (-not (Test-Path $7z_exe) -or -not (Test-Path $7z_dll)) {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $7z_exe_URL -OutFile $7z_exe
+            Invoke-WebRequest -UseBasicParsing -Uri $7z_dll_URL -OutFile $7z_dll
         }
         catch {
             $_.Exception.Message
         }
     }
-
-if (-not (Test-Path $7z_exe) -or -not (Test-Path $7z_dll)) {
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri $7z_exe_URL -OutFile $7z_exe
-        Invoke-WebRequest -UseBasicParsing -Uri $7z_dll_URL -OutFile $7z_dll
-    }
-    catch {
-        $_.Exception.Message
-    }
-}
 
     if (-not (Test-Path $offlinereg -PathType Leaf) -or -not (Test-Path $offlinereg_dll -PathType Leaf)) {
         try {
@@ -670,6 +681,10 @@ function Validate-PFXCert {
                     return 'ALLOWED'
                 }
             }
+        }
+
+        'Ventoy Secure Boot Root CA' {
+            return 'UNVERIFIED'
         }
     }
 
@@ -1600,7 +1615,7 @@ function Validate-BootMgrFile
     $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
 
     switch -Regex (Validate-PFXCert $PFXCert) {
-        'BANNED|UNTRUSTED' {
+        'BANNED|UNTRUSTED|UNVERIFIED' {
             '{0}{1} [{2}] {3} {4}.' -f $Indent, $Label, ($PFXCert -replace 'Microsoft Windows '), $SecureBoot_Verb, $_
         }
 
@@ -1716,6 +1731,22 @@ function Validate-BootStl {
     }
 }
 
+function Validate-RepairMyPC {
+    param (
+        [Parameter(Mandatory)]
+        [string]$WIM_File,
+
+        [Parameter(Mandatory=$false)]
+        [string]$Indent
+    )
+
+    if (Test-Path $WIM_File) {
+        if ((& $7z_exe -ba l $WIM_File 2/Windows/System32/wlanapi.dl 2/Windows/System32/mobilenetworking.dll).Count -ne 2) {
+            "`n{0}'Repair My PC' is broken in WinPE." -f $Indent
+        }
+    }
+}
+
 function Check-CacheFolders {
     try {
         $InstallDir = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Macrium\RescuePE' -Name 'InstallDir' -ErrorAction Stop
@@ -1797,27 +1828,27 @@ function Check-WIM_File {
 
     if ($WIM_file -match '.swm$') {
         $SWM_Path = Split-Path $WIM_File
-        $Temp_WIM = "$TEMP_DIR\install.wim"
+        $Temp_WIM = "$TEMP_DIR\install.{0}.wim" -f [System.IO.Path]::GetRandomFileName()
 
         "{0}Please wait while install SWM is analyzed.`n" -f $Tab4
 
         try {
-            $null = Export-WindowsImage -SourceImagePath $WIM_File -SplitImageFilePattern "$SWM_Path\install*.swm" -SourceIndex 1 -DestinationImagePath $Temp_WIM
-            Start-Sleep 2
+            $null = Export-WindowsImage -SourceImagePath $WIM_File -SplitImageFilePattern "$SWM_Path\install*.swm" -SourceIndex $Index -DestinationImagePath $Temp_WIM
         }
         catch {
             $_.Exception.Message
             exit 1
         }
 
+        Start-Sleep 2
+        $Extract_Files = $Extract_Files -replace '/Windows','Windows'
         Start-Process $7z_exe -ArgumentList "e $Temp_WIM -aoa $Extract_Files -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
-        Remove-Item $Temp_WIM -Force
     }
     else {
         $ArgumentList = "extract `"$WIM_File`" $Index $Extract_Files --quiet --nullglob --no-acls --dest-dir=`"$env:TEMP`""
 
         try {
-            Start-Process $wimlib_imagex -ArgumentList $ArgumentList -NoNewWindow -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -Wait
+            Start-Process $wimlib_imagex -ArgumentList $ArgumentList -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
         }
         catch {
             $_.Exception.Message
@@ -1927,6 +1958,18 @@ function Check-WIM_File {
         "{0}ERROR: No winload.efi found in WIM." -f $Tab8
     }
 
+    if ($Verbose -and $WIM_Type -match 'WinPE') {
+        $WIM_Path = Split-Path $WIM_File
+
+        if (((Get-ChildItem -Path "$WIM_Path\install.*" -ErrorAction SilentlyContinue) | where { $_.Name -match 'wim|esd|swm' }) -and ((Get-WindowsImage -ImagePath $WIM_File -Index 2).ModifiedTime -ge [datetime]'2026-05-06')) {
+            Validate-RepairMyPC $WIM_File -Indent $Indent2
+        }
+    }
+
+    if ($WIM_file -match '.swm$') {
+        Remove-Item $Temp_WIM -Force
+    }
+
     foreach ($File in @($Hive, $Temp_BootMgrEX_File, $Temp_BootMgr_File, $WinloadEFI_File)) {
         Remove-Item $File -Force -ErrorAction SilentlyContinue
     }
@@ -1951,14 +1994,26 @@ function Check-DriveVolume {
 
     $Drive = $DriveLetter + ':'
 
-    $Boot_WIM = "$Drive\sources\boot.wim"
-    $WIM_Formats = @('wim','esd','swm')
+    $EFI_BootMgr_File = "$Drive\EFI\Microsoft\Boot\bootmgfw.efi"
+    $EFI_BootFile = "$Drive\EFI\Boot\boot${Arch}.efi"
+    $EFI_VentoyGRUB_File = "$Drive\EFI\BOOT\grubx64_real.efi"
 
-    if (-not (Test-Path $Boot_WIM) -and -((Get-ChildItem -Path "$Drive\sources\install.*" -ErrorAction SilentlyContinue) | where { $_.Name -notmatch 'wim|esd|swm' })) {
-        return
-    }
+    $Boot_WIM = "$Drive\sources\boot.wim"
 
     $Label = $DriveVolume.FileSystemLabel
+
+    switch ($DriveVolume.DriveType) {
+        'Removable' { $DriveType = 'USB' }
+        'CD-ROM'    { $DriveType = 'DVD' }
+    }
+
+    if (-not (Test-Path $EFI_BootMgr_File) -and -not (Test-Path $EFI_BootFile)) {
+        if (Test-Path "$Drive\ventoy") {
+            "`nSkipping {0}Drive {1} `"{2}`"" -f $(if ($DriveType) { "$DriveType " }), $Drive, $Label
+        }
+
+        return
+    }
 
     if ($ShowPath) {
         $ImagePath = ($DriveVolume | Get-DiskImage).ImagePath
@@ -1971,29 +2026,32 @@ function Check-DriveVolume {
         }
     }
     else {
-        if ($DriveVolume.DriveType -eq 'Removable') {
-            $DriveType = 'USB'
-        }
-        else {
-            $DriveType = 'DVD'
-        }
-
         if ($Label -ne '') {
-            "`n{0} Drive {1} `"{2}`"" -f $DriveType, $Drive, $Label
+            "`n{0}Drive {1} `"{2}`"" -f $(if ($DriveType) { "$DriveType " }), $Drive, $Label
         }
         else {
-            "`n{0} Drive {1}" -f $DriveType, $Drive
+            "`n{0}Drive {1}" -f $(if ($DriveType) { "$DriveType " }), $Drive
         }
     }
-
-    $EFI_BootMgr_File = "$Drive\EFI\Microsoft\Boot\bootmgfw.efi"
-    $EFI_BootFile = "$Drive\EFI\Boot\boot${Arch}.efi"
 
     if (Test-Path $EFI_BootMgr_File) {
         Validate-BootMgrFile -BootMgr_File $EFI_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
     }
-    elseif (Test-Path $EFI_BootFile) {
-        Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab4
+
+    if (Test-Path $EFI_BootFile) {
+        if (-not (Test-Path $EFI_VentoyGRUB_File)) {
+            Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab4
+        }
+        else {
+            if ($Verbose) {
+                Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot Shim' -Indent $Tab4
+            }
+            else {
+                Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot Shim' -Indent $Tab4 -SkipNewLine
+            }
+
+            Validate-BootMgrFile -BootMgr_File $EFI_VentoyGRUB_File -Label 'GRUB Boot Manager' -Indent $Tab4
+        }
     }
 
     if (Test-Path $Boot_WIM) {
@@ -2065,7 +2123,7 @@ function Check-DriveVolume {
 }
 
 $ScriptBlock = {
-    if (-not (Test-Path $wimlib_imagex) -or -not (Test-Path $offlinereg)) {
+    if (-not (Test-Path $wimlib_imagex) -or -not (Test-Path $7z_exe) -or -not (Test-Path $offlinereg)) {
         Install-Tools
     }
 
@@ -2386,20 +2444,22 @@ $ScriptBlock = {
     else {
         Check-CacheFolders
 
-        $USB_DeviceIDs = @(((Get-PnpDevice -PresentOnly | where { $_.Service -eq 'USBSTOR' }).PNPDeviceID -split '\\')[2])
-        $MBR_Drives = @((Get-Partition | where { $_.MbrType }).DriveLetter)
-        
-        # Overlap of USB devices which are not Fixed Disk + mounted CDROM's + MBR/FAT32 devices
-        $RemovableDrives = @(
-            @((Get-CimInstance -ClassName Win32_DiskDrive | where { $_.PNPDeviceID -match $USB_DeviceIDs } | Get-CimAssociatedInstance -ResultClass Win32_DiskPartition | Get-CimAssociatedInstance -ResultClass Win32_LogicalDisk).DeviceID.SubString(0,1)) + `
-            @((Get-Volume | where { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter -match '[A-Z]' -and $_.OperationalStatus -eq 'OK' }).DriveLetter) + `
-            @((Get-Volume | where { $_.DriveLetter -in $MBR_Drives -and $_.FileSystemType -eq 'FAT32' }).DriveLetter)
-        ) | sort -Unique
+        $RemovableDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Removable|CD-ROM' -and $_.FileSystem -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.SubString(0,1) })
 
         if ($RemovableDrives.Count) {
             Print-Header 'Bootable Media'
 
             foreach ($Drive in $RemovableDrives) {
+                Check-DriveVolume -DriveLetter $Drive
+            }
+        }
+
+        $FixedDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Fixed' -and $_.FileSystem -match 'FAT' -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.SubString(0,1) })
+
+        if ($FixedDrives.Count) {
+            Print-Header 'Fixed Drives'
+
+            foreach ($Drive in $FixedDrives) {
                 Check-DriveVolume -DriveLetter $Drive
             }
         }
