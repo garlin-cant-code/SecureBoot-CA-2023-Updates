@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.11
+.VERSION 2026.08.18
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.11'
+$ScriptVersion = '2026.08.18'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -893,12 +893,9 @@ function Get-SbatLevel {
     if ($SbatLevel_Bytes.Count) {
         $SbatLevel = [System.Text.Encoding]::ASCII.GetString($SbatLevel_Bytes) -replace ' ' -replace "`0"
 
-        if ($SbatLevel -match '!SBATnotfound') {
+        if ($SbatLevel -match '!SBATnotfound' -or $SbatLevel -eq "`0") {
             $SbatLevel = $null
         }
-    }
-    else {
-        $SbatLevel = $null
     }
 
     return $SbatLevel
@@ -988,7 +985,7 @@ function Audit-UEFI {
     }
 
     if ($SecureBoot_TaskState) {
-        $CheckList += "{0,-3} 'Secure-Boot-Update' scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
     }
 
     if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
@@ -1144,6 +1141,78 @@ function Run-FiniteStateMachine {
         else {
             $script:RevokeMessage = 'To update the DBX SVN'
         }
+    }
+
+    if (-not $PK_Untrusted -and (('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) -or $SignedKEK)) {
+        $MergedFlags = $UpdateFlags -bor $RevokeFlags
+
+        if ($UpdateFlags -and $RevokeFlags) {
+            "`nOPTION 1:  DO NOTHING AND WAIT.  Windows will apply the UEFI updates (PC has supported BIOS)."
+
+            if ($RevokeFlags -band 0x80) {
+                "`nOPTION 2:  {0} WITHOUT REVOKING the [PCA 2011] cert, run the commands:`n" -f $UpdateMessage
+            }
+            else {
+                "`nOPTION 2:  {0}, run the commands:`n" -f $UpdateMessage
+            }
+
+            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+
+            '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
+            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
+
+            "`n`nOPTION 3:  {0}, run the commands:`n" -f $RevokeMessage
+
+            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+
+            if ($UpdateFlags) {
+                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $MergedFlags
+            }
+            else {
+                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
+            }
+
+            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
+        }
+        elseif ($UpdateFlags) {
+            "`n{0}, run the commands:`n" -f $UpdateMessage
+
+            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+
+            '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
+            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
+        }
+        elseif ($RevokeFlags) {
+            "`n{0}, run the commands:`n" -f $RevokeMessage
+
+            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+
+            '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
+            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
+        }
+
+        if ($UpdateSkuSiPolicy) {
+            "`n[OPTIONAL] To update SkuSiPolicy.p7b, run the command:"
+            '{0}Update_UEFI-CA2023.ps1 -SkuSiPolicy' -f $Tab4
+        }
+    }
+    else {
+        if (-not $SetupMode) {
+            "`nMANUAL UPDATE of the BIOS is required.`n"
+
+            "Enter the BIOS menu, and search for User or Custom Mode option of updating the UEFI PK or KEK keys."
+            "If your BIOS doesn't support this feature, select Setup Mode to clear all certs."
+
+            if ($WindowsHello) {
+                "`nIMPORTANT: Disable Windows Hello PIN before clearing certs."
+            }
+        }
+
+        "`nOPTION 1:  {0}`n" -f $UpdateMessage
+        '{0}Update_UEFI-CA2023.ps1' -f $Tab8
+
+        "`n`nOPTION 2:  {0}`n" -f $RevokeMessage
+        '{0}Update_UEFI-CA2023.ps1 -Revoke' -f $Tab8
     }
 }
 
@@ -1623,10 +1692,6 @@ $ScriptBlock = {
             }
         }
 
-        Run-FiniteStateMachine
-
-        Print-Header -Bold 'REQUIRED ACTION'
-
         if (('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs) -and ('Windows UEFI CA 2023' -in $db_Certs)) {
             "`nRun the command:`n{0}Update_UEFI-CA2023.ps1{1}`n" -f $Tab4, $(if ($RevokeFlags) { ' -Revoke' })
 
@@ -1638,83 +1703,14 @@ $ScriptBlock = {
             break
         }
 
-        if (-not $PK_Untrusted -and (('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) -or $SignedKEK)) {
-            $MergedFlags = $UpdateFlags -bor $RevokeFlags
-
-            if ($UpdateFlags -and $RevokeFlags) {
-                "`nOPTION 1:  DO NOTHING AND WAIT.  Windows will apply the UEFI updates (PC has supported BIOS)."
-
-                if ($RevokeFlags -band 0x80) {
-                    "`nOPTION 2:  {0} WITHOUT REVOKING the [PCA 2011] cert, run the commands:`n" -f $UpdateMessage
-                }
-                else {
-                    "`nOPTION 2:  {0}, run the commands:`n" -f $UpdateMessage
-                }
-
-                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
-
-                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
-                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
-
-                "`n`nOPTION 3:  {0}, run the commands:`n" -f $RevokeMessage
-
-                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
-
-                if ($UpdateFlags) {
-                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $MergedFlags
-                }
-                else {
-                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
-                }
-
-                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
-            }
-            elseif ($UpdateFlags) {
-                "{0}, run the commands:`n" -f $UpdateMessage
-
-                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
-
-                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
-                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
-            }
-            elseif ($RevokeFlags) {
-                "{0}, run the commands:`n" -f $RevokeMessage
-
-                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
-
-                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
-                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
-            }
-
-            if ($UpdateSkuSiPolicy) {
-                "`n[OPTIONAL] To update SkuSiPolicy.p7b, run the command:"
-                '{0}Update_UEFI-CA2023.ps1 -SkuSiPolicy' -f $Tab4
-            }
-        }
-        else {
-            if (-not $SetupMode) {
-                "`nMANUAL UPDATE of the BIOS is required.`n"
-
-                "Enter the BIOS menu, and search for User or Custom Mode option of updating the UEFI PK or KEK keys."
-                "If your BIOS doesn't support this feature, select Setup Mode to clear all certs."
-
-                if ($WindowsHello) {
-                    "`nIMPORTANT: Disable Windows Hello PIN before clearing certs."
-                }
-            }
-
-            "`nOPTION 1:  {0}`n" -f $UpdateMessage
-            '{0}Update_UEFI-CA2023.ps1' -f $Tab8
-
-            "`n`nOPTION 2:  {0}`n" -f $RevokeMessage
-            '{0}Update_UEFI-CA2023.ps1 -Revoke' -f $Tab8
-        }
+        Print-Header -Bold 'REQUIRED ACTION'
+        Run-FiniteStateMachine
     }
     else {
         Print-Header 'STATUS REPORT'
 
         if ($SecureBoot_TaskState) {
-            "{0}Scheduled Task: 'Secure-Boot-Update' is {1}`n" -f $Tab4, $SecureBoot_TaskState
+            "{0}Scheduled Task: `"Secure-Boot-Update`" is {1}.`n" -f $Tab4, $SecureBoot_TaskState
         }
 
         try {
