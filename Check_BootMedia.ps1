@@ -1741,7 +1741,7 @@ function Validate-RepairMyPC {
     )
 
     if (Test-Path $WIM_File) {
-        if ((& $7z_exe -ba l $WIM_File 2/Windows/System32/wlanapi.dl 2/Windows/System32/mobilenetworking.dll).Count -ne 2) {
+        if ((& $7z_exe -ba l $WIM_File 2/Windows/System32/wlanapi.dll 2/Windows/System32/mobilenetworking.dll).Count -ne 2) {
             "`n{0}'Repair My PC' is broken in WinPE." -f $Indent
         }
     }
