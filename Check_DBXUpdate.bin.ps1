@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.08.11
+$VERSION 2026.08.21
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.11'
+$ScriptVersion = '2026.08.21'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -248,7 +248,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     $args = ($MyInvocation.BoundParameters.Keys.GetEnumerator() | where { $_ -ne 'Paths' } | foreach { '-{0}' -f $_ }) -join ' '
 
     if ($MyInvocation.BoundParameters.'Paths' -ne $null) {
-        $args += ' ' + ($MyInvocation.BoundParameters.'Paths' | foreach { '"{0}"' -f (Get-Item $_ -ErrorAction SilentlyContinue).FullName }) -join ' '
+        $args += ' ' + ($MyInvocation.BoundParameters.'Paths' | foreach { '"{0}"' -f (Get-Item $_ -Force -ErrorAction SilentlyContinue).FullName }) -join ' '
     }
 
     Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
@@ -738,7 +738,7 @@ $SortKey = 0
 
 foreach ($item in $Paths) {
     try {
-        $null = Get-Item $item -ErrorAction Stop
+        $null = Get-Item $item -Force -ErrorAction Stop
     }
     catch {
         'Skipping file or folder path: "{0}"' -f $item
@@ -749,11 +749,11 @@ foreach ($item in $Paths) {
         $Path = Resolve-Path $item -Relative
 
         if (Test-Path $Path -PathType Container) {
-            foreach ($File in (Resolve-Path (Get-ChildItem $Path -File).FullName -Relative)) {
+            foreach ($File in (Resolve-Path (Get-ChildItem $Path -Force -File).FullName -Relative)) {
                 if ($File -match '(.*dbx.*)\.bin$') {
                     $DBX_Files += [PSCustomObject]@{
                         RelativePath = $File
-                        FullPath = (Get-Item $File).FullName
+                        FullPath = (Get-Item $File -Force).FullName
                         SortKey = $SortKey++
                     }
                 }
@@ -762,7 +762,7 @@ foreach ($item in $Paths) {
         else {
             $DBX_Files += [PSCustomObject]@{
                 RelativePath = $Path
-                FullPath = (Get-Item $Path).FullName
+                FullPath = (Get-Item $Path -Force).FullName
                 SortKey = $SortKey++
             }
         }
@@ -775,7 +775,7 @@ foreach ($item in $Paths) {
         $Path = (Resolve-Path $item).Path
 
         if (Test-Path $Path -PathType Container) {
-            foreach ($File in (Get-ChildItem $Path -File).FullName) {
+            foreach ($File in (Get-ChildItem $Path -File -Force).FullName) {
                 if ($File -match '(.*dbx.*)\.bin$') {
                     $regex = "$env:SystemRoot\System32\SecureBootUpdates|$env:SystemRoot\SysNative\SecureBootUpdates" -replace '\\','\\'
 
@@ -794,7 +794,7 @@ foreach ($item in $Paths) {
         else {
             $DBX_Files += [PSCustomObject]@{
                 RelativePath = $Path
-                FullPath = (Get-Item $Path).FullName
+                FullPath = (Get-Item $Path -Force).FullName
                 SortKey = $SortKey++
             }
         }
