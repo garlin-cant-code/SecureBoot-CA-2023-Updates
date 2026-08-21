@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.18
+.VERSION 2026.08.21
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -85,7 +85,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.18'
+$ScriptVersion = '2026.08.21'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -138,7 +138,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     $args = ($MyInvocation.BoundParameters.Keys.GetEnumerator() | where { $_ -ne 'Paths' } | foreach { '-{0}' -f $_ }) -join ' '
 
     if ($MyInvocation.BoundParameters.'Paths' -ne $null) {
-        $args += ' ' + ($MyInvocation.BoundParameters.'Paths' | foreach { '"{0}"' -f (Get-Item $_ -ErrorAction SilentlyContinue).FullName }) -join ' '
+        $args += ' ' + ($MyInvocation.BoundParameters.'Paths' | foreach { '"{0}"' -f (Get-Item $_ -Force -ErrorAction SilentlyContinue).FullName }) -join ' '
     }
 
     Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
@@ -368,7 +368,7 @@ function Get-FileVersion {
         [string]$File
     )
 
-    $FileVersionRaw = (Get-Item -LiteralPath $File).VersionInfo.FileVersionRaw
+    $FileVersionRaw = (Get-Item -LiteralPath $File -Force).VersionInfo.FileVersionRaw
     $FileVersion = '{0}.{1}' -f $FileVersionRaw.Build, $FileVersionRaw.Revision
 
     return $FileVersion
@@ -1650,7 +1650,7 @@ function Validate-BootMgrFile
         }
 
         if ($FileVersion -ne '0.0') {
-            if ($BootMgrSVN -ne $null) {
+            if ($BootMgrSVN -ne '0.0') {
                 "{0}{1}`n{2}File Version: {3}, SVN {4}{5}" -f $Indent, $BootMgr_File, $Indent, $FileVersion, $BootMgrSVN, $NewLine
             }
             else {
@@ -1681,7 +1681,7 @@ function Validate-WinloadEFI_File
         return $Status
     }
 
-    $File = Get-Item $WinloadEFI_File
+    $File = Get-Item $WinloadEFI_File -Force
     $FileVersion = [version]$File.VersionInfo.FileVersionRaw
 
     foreach ($Rule in $FileRules) {
@@ -1826,7 +1826,7 @@ function Check-WIM_File {
 
     $Extract_Files = '/Windows/Boot/EFI/bootmgfw.efi /Windows/Boot/EFI_EX/bootmgfw_EX.efi /Windows/System32/config/SOFTWARE /Windows/System32/winload.efi'
 
-    if ($WIM_file -match '.swm$') {
+    if ($WIM_File -match '.swm$') {
         $SWM_Path = Split-Path $WIM_File
         $Temp_WIM = "$TEMP_DIR\install.{0}.wim" -f [System.IO.Path]::GetRandomFileName()
 
@@ -1844,6 +1844,22 @@ function Check-WIM_File {
         $Extract_Files = $Extract_Files -replace '/Windows','Windows'
         Start-Process $7z_exe -ArgumentList "e $Temp_WIM -aoa $Extract_Files -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
     }
+    elseif ($WIM_File -match 'Reconstruct.WIM') {
+        $WIM_Path = Split-Path $WIM_File
+        $WIM_List = @((Get-ChildItem "$WIM_Path\Reconstruct.*" -Force -ErrorAction SilentlyContinue).FullName)
+
+        $WinSxS = @(foreach ($ReconstructWIM in $WIM_List) {
+             & $7z_exe l $ReconstructWIM | Select-String "[0-9a-f]\\bootmgfw_EX.efi$" | foreach {
+                 [PSCustomObject] @{
+                     WIM_File = $ReconstructWIM
+                     Component_File = ($_ -split ' ')[-1]
+                 }
+             }
+        }) | sort Component_File | select -Last 1
+
+        Start-Process $7z_exe -ArgumentList "e $($WinSxS.WIM_File) -aoa $($WinSxS.Component_File) -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
+        Start-Process $7z_exe -ArgumentList "e $WIM_File -aoa Windows\System32\config\SOFTWARE Windows\System32\winload.efi -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
+    }
     else {
         $ArgumentList = "extract `"$WIM_File`" $Index $Extract_Files --quiet --nullglob --no-acls --dest-dir=`"$env:TEMP`""
 
@@ -1856,7 +1872,7 @@ function Check-WIM_File {
         }
     }
 
-    if ($WIM_File -match '(boot|winpe).wim') {
+    if ($WIM_File -match '(boot|winpe|winre).wim') {
         if ((& $wimlib_imagex dir $WIM_File $Index -path=/Windows/System32) -match 'MXEAgent.dll') {
             $WIM_Type = 'WinRE'
         }
@@ -1869,7 +1885,14 @@ function Check-WIM_File {
     $CurrentVersion = & $offlinereg $Hive 'Microsoft\Windows NT\CurrentVersion' enumallvalues
 
     $Build = [int](($CurrentVersion | Select-String '"CurrentBuild"') -split '"')[3]
-    $UBR = (($CurrentVersion | Select-String 'UBR') -split ':')[-1]
+
+    if ($WIM_Type -eq 'WinRE') {
+        $UBR = (((& $wimlib_imagex info $WIM_File) | Select-String 'Service Pack Build') -split ' ')[-1]
+    }
+    else {
+        $UBR = (($CurrentVersion | Select-String 'UBR') -split ':')[-1]
+    }
+
     $DisplayVersion = (($CurrentVersion | Select-String '"DisplayVersion"') -split '"')[3]
 
     switch ($Build) {
@@ -1926,7 +1949,7 @@ function Check-WIM_File {
         Validate-BootMgrFile -BootMgr_File $Temp_BootMgr_File -Label 'Boot Manager' -ShowAsFile '\Windows\Boot\EFI\bootmgfw.efi' -Indent $Indent2 -SkipNewLine
     }
     else {
-        '{0}ERROR: No boot manager found in WIM.' -f $Tab8
+        'ERROR: No boot manager found in WIM.'
     }
 
     $WinloadEFI_File = "$env:TEMP\winload.efi"
@@ -1955,7 +1978,7 @@ function Check-WIM_File {
         }
     }
     else {
-        "{0}ERROR: No winload.efi found in WIM." -f $Tab8
+        "ERROR: No winload.efi found in WIM."
     }
 
     if ($Verbose -and $WIM_Type -match 'WinPE') {
@@ -1999,6 +2022,7 @@ function Check-DriveVolume {
     $EFI_VentoyGRUB_File = "$Drive\EFI\BOOT\grubx64_real.efi"
 
     $Boot_WIM = "$Drive\sources\boot.wim"
+    $Reconstruct_WIM = "$Drive\sources\Reconstruct.WIM"
 
     $Label = $DriveVolume.FileSystemLabel
 
@@ -2037,8 +2061,7 @@ function Check-DriveVolume {
     if (Test-Path $EFI_BootMgr_File) {
         Validate-BootMgrFile -BootMgr_File $EFI_BootMgr_File -Label 'Windows Boot Manager' -Indent $Tab4
     }
-
-    if (Test-Path $EFI_BootFile) {
+    elseif (Test-Path $EFI_BootFile) {
         if (-not (Test-Path $EFI_VentoyGRUB_File)) {
             Validate-BootMgrFile -BootMgr_File $EFI_BootFile -Label 'Boot File' -Indent $Tab4
         }
@@ -2076,6 +2099,11 @@ function Check-DriveVolume {
 
         Check-WIM_File -WIM_File $Boot_WIM -Index $Index
         if ($Verbose) { '' }
+    }
+
+    if (Test-Path $Reconstruct_WIM) {
+        Check-WIM_File -WIM_File $Reconstruct_WIM -Index 1
+        return
     }
 
     foreach ($Format in $WIM_Formats) {
@@ -2215,17 +2243,19 @@ $ScriptBlock = {
         New-Variable -Name "${Variable}_BytesCount" -Value $Count
     }
 
-    Print-UEFICerts -Name 'KEK' -CertArray ([ref]$KEK_Certs)
-    Print-UEFICerts -Name 'DB' -CertArray ([ref]$db_Certs)
-    Print-UEFICerts -Name 'DBX' -CertArray ([ref]$dbx_Certs)
+    if (-not $Quiet) {
+        Print-UEFICerts -Name 'KEK' -CertArray ([ref]$KEK_Certs)
+        Print-UEFICerts -Name 'DB' -CertArray ([ref]$db_Certs)
+        Print-UEFICerts -Name 'DBX' -CertArray ([ref]$dbx_Certs)
 
-    $UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
+        $UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
-    if ($UEFI_SVN) {
-        '{0}Windows BootMgr SVN {1}' -f $Tab4, $UEFI_SVN
-    }
-    elseif ($Verbose) {
-        '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
+        if ($UEFI_SVN) {
+            '{0}Windows BootMgr SVN {1}' -f $Tab4, $UEFI_SVN
+        }
+        elseif ($Verbose) {
+            '{0}Windows BootMgr SVN is MISSING.' -f $Tab4
+        }
     }
 
     $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
@@ -2374,13 +2404,11 @@ $ScriptBlock = {
             if ($File -match '^[A-Z]:$') {
                 $DriveLetter = $File -replace ':'
 
-                $Volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
-
-                if ($Volume.Count) {
+                if ((Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue) -ne $null) {
                     Check-DriveVolume -DriveLetter $DriveLetter
                 }
                 else {
-                    "Skipping unmounted drive $File."
+                    "Skipping unmounted drive $File"
                     $Token = $true
                 }
 
@@ -2388,7 +2416,7 @@ $ScriptBlock = {
             }
 
             try {
-                $FilePath = (Get-Item $File -ErrorAction Stop).FullName
+                $FilePath = (Get-Item $File -Force -ErrorAction Stop).FullName
             }
             catch {
                 "Skipping `"$File`": File not found."
@@ -2444,7 +2472,7 @@ $ScriptBlock = {
     else {
         Check-CacheFolders
 
-        $RemovableDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Removable|CD-ROM' -and $_.FileSystem -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.SubString(0,1) })
+        $RemovableDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Removable|CD-ROM' -and $_.FileSystem -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.Substring(0,1) })
 
         if ($RemovableDrives.Count) {
             Print-Header 'Bootable Media'
@@ -2454,7 +2482,7 @@ $ScriptBlock = {
             }
         }
 
-        $FixedDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Fixed' -and $_.FileSystem -match 'FAT' -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.SubString(0,1) })
+        $FixedDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Fixed' -and $_.FileSystem -match 'FAT' -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.Substring(0,1) })
 
         if ($FixedDrives.Count) {
             Print-Header 'Fixed Drives'

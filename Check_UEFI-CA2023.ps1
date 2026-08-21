@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.18
+.VERSION 2026.08.21
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.18'
+$ScriptVersion = '2026.08.21'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -270,7 +270,7 @@ function Get-FileVersion {
         [string]$File
     )
 
-    $FileVersionRaw = (Get-Item -LiteralPath $File).VersionInfo.FileVersionRaw
+    $FileVersionRaw = (Get-Item -LiteralPath $File -Force).VersionInfo.FileVersionRaw
     $FileVersion = '{0}.{1}' -f $FileVersionRaw.Build, $FileVersionRaw.Revision
 
     return $FileVersion
@@ -937,7 +937,7 @@ function Validate-BootMgrFile
         $Indent += $Tab4
 
         if ($FileVersion -ne '0.0') {
-            if ($BootMgrSVN -ne $null) {
+            if ($BootMgrSVN -ne '0.0') {
                 "{0}{1}`n{2}File Version: {3}, SVN {4}`n" -f $Indent, $BootMgr_File, $Indent, $FileVersion, $BootMgrSVN
             }
             else {
@@ -984,12 +984,12 @@ function Audit-UEFI {
         $NotMinimumUBR = $true
     }
 
-    if ($SecureBoot_TaskState) {
-        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
-    }
-
     if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
         $CheckList += "{0,-3} Secure Boot is DISABLED`n" -f ('{0}.' -f $index++)
+    }
+
+    if ($SecureBoot_TaskState) {
+        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
     }
 
     if ($SetupMode) {
@@ -1399,7 +1399,7 @@ $ScriptBlock = {
     }
 
     try {
-        $SetupMode_Bytes = Get-SecureBootUEFI SetupMode
+        $SetupMode_Bytes = (Get-SecureBootUEFI SetupMode).Bytes
     }
     catch {
         if ($_.Exception.Message -match '0xC0000100') {
@@ -1410,7 +1410,7 @@ $ScriptBlock = {
         }
     }
 
-    if ((($SetupMode_Bytes -join '') -eq 1) -or ($PK_BytesCount -eq 0 -and $KEK_BytesCount -eq 0 -and $db_BytesCount -eq 0 -and $dbx_BytesCount -eq 0)) {
+    if (($SetupMode_Bytes -eq 1) -or ($PK_BytesCount -eq 0 -and $KEK_BytesCount -eq 0 -and $db_BytesCount -eq 0 -and $dbx_BytesCount -eq 0)) {
         if (-not $Verbose) {
             "`nUEFI is in Setup Mode (NO CERTS)"
         }

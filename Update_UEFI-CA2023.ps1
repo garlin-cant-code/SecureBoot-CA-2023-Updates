@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.18
+.VERSION 2026.08.21
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -99,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.18'
+$ScriptVersion = '2026.08.21'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -152,7 +152,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     $args = ($MyInvocation.BoundParameters.Keys.GetEnumerator() | where { $_ -notmatch 'UpdatesFolder|ignored' } | foreach { '-{0}' -f $_ }) -join ' '
 
     if ($MyInvocation.BoundParameters.'UpdatesFolder' -ne $null) {
-        $args += ' -UpdatesFolder "{0}"' -f (Get-Item $MyInvocation.BoundParameters.'UpdatesFolder' -ErrorAction SilentlyContinue).FullName
+        $args += ' -UpdatesFolder "{0}"' -f (Get-Item $MyInvocation.BoundParameters.'UpdatesFolder' -Force -ErrorAction SilentlyContinue).FullName
     }
 
     Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
@@ -324,7 +324,7 @@ function Get-FileVersion {
         [string]$File
     )
 
-    $FileVersionRaw = (Get-Item -LiteralPath $File).VersionInfo.FileVersionRaw
+    $FileVersionRaw = (Get-Item -LiteralPath $File -Force).VersionInfo.FileVersionRaw
     $FileVersion = '{0}.{1}' -f $FileVersionRaw.Build, $FileVersionRaw.Revision
 
     return $FileVersion
@@ -1527,7 +1527,7 @@ $ScriptBlock = {
     }
 
     try {
-        $SetupMode_Bytes = Get-SecureBootUEFI SetupMode
+        $SetupMode_Bytes = (Get-SecureBootUEFI SetupMode).Bytes
     }
     catch {
         if ($_.Exception.Message -match '0xC0000100') {
@@ -1538,7 +1538,7 @@ $ScriptBlock = {
         }
     }
 
-    if (($SetupMode_Bytes -join '') -eq 1) {
+    if ($SetupMode_Bytes -eq 1) {
         if ($WindowsHello) {
             Write-Host "WARNING: Disable Windows Hello PIN before running script in Setup Mode." -ForegroundColor Red
             exit 1
@@ -1813,7 +1813,7 @@ $ScriptBlock = {
         }
 
         if ($BootMedia) {
-            $RemovableDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Removable' -and $_.FileSystem -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.SubString(0,1) })
+            $RemovableDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Removable' -and $_.FileSystem -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.Substring(0,1) })
 
             if ($RemovableDrives.Count -eq 0) {
                 "No USB removable media found.`n"
