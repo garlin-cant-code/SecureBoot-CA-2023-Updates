@@ -157,13 +157,13 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit 0
 }
 
-if ([Environment]::Is64BitProcess) {
-    $bcdedit = 'bcdedit'
-    $bcdboot = 'bcdboot'
-}
-else {
+if ($env:PROCESSOR_ARCHITEW6432) {
     $bcdedit = "$env:SystemRoot\SysNative\bcdedit"
     $bcdboot = "$env:SystemRoot\SysNative\bcdboot"
+}
+else {
+    $bcdedit = 'bcdedit'
+    $bcdboot = 'bcdboot'
 }
 
 $System = Get-CimInstance -ClassName Win32_ComputerSystem

@@ -155,13 +155,13 @@ if ($Quiet) {
     $Verbose = $false
 }
 
-if ([Environment]::Is64BitProcess) {
-    $UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates"
-    $bcdedit = 'bcdedit'
-}
-else {
+if ($env:PROCESSOR_ARCHITEW6432) {
     $UpdatesFolder = "$env:SystemRoot\SysNative\SecureBootUpdates"
     $bcdedit = "$env:SystemRoot\SysNative\bcdedit"
+}
+else {
+    $UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates"
+    $bcdedit = 'bcdedit'
 }
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
