@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.21
+.VERSION 2026.08.24
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.21'
+$ScriptVersion = '2026.08.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -116,16 +116,11 @@ if ($PSBoundParameters['Verbose']) {
 
 if ([Environment]::Is64BitProcess) {
     $UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates"
+    $bcdedit = 'bcdedit'
 }
 else {
     $UpdatesFolder = "$env:SystemRoot\SysNative\SecureBootUpdates"
-}
-
-switch ($env:PROCESSOR_ARCHITECTURE) {
-    'amd64' { $Arch = 'x64' }
-    'x86'   { $Arch = 'x86' }
-    'arm64' { $Arch = 'aa64' }
-    'arm'   { $Arch = 'aa32' }
+    $bcdedit = "$env:SystemRoot\SysNative\bcdedit"
 }
 
 $System = Get-CimInstance -ClassName Win32_ComputerSystem
@@ -1541,7 +1536,7 @@ $ScriptBlock = {
         }
     }
 
-    $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
+    $EFI_Device = & "$bcdedit" /enum '{bootmgr}' | Select-String 'device'
 
     switch -Regex (, $EFI_Device) {
         'Harddisk' {
@@ -1631,15 +1626,8 @@ $ScriptBlock = {
             "`n{0}[OPTIONAL] SkuSiPolicy.p7b (for VBS) is MISSING." -f $Tab4
         }
 
-        if ([Environment]::Is64BitProcess) {
-            if ((& bcdedit | Select-String 'winload.efi').Count -gt 1) {
-                '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
-            }
-        }
-        else {
-            if ((& "$env:SystemRoot\SysNative\bcdedit" | Select-String 'winload.efi').Count -gt 1) {
-                '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
-            }
+        if ((& "$bcdedit" | Select-String 'winload.efi').Count -gt 1) {
+            '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
         }
     }
 
