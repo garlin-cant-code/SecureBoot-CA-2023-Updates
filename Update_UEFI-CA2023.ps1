@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.21
+.VERSION 2026.08.24
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -99,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.21'
+$ScriptVersion = '2026.08.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -112,11 +112,9 @@ $CN_Regex = '(CN=)([^,]+)'
 
 $Tab4 = ' ' * 4
 
-$Arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
-
-switch ($Arch) {
+switch ($env:PROCESSOR_ARCHITECTURE) {
     'amd64' { $EDK2_Arch = 'x64' }
-    'x86'   { $EDK2_Arch = 'ia32' }
+    'x86'   { if ($env:PROCESSOR_ARCHITEW6432) { $EDK2_Arch = 'x64'; $Arch = 'x64' } else { $EDK2_Arch = 'ia32' } }
     'arm64' { $EDK2_Arch = 'aarch64' }
     'arm'   { $EDK2_Arch = 'arm' }
 }
@@ -157,6 +155,15 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
     Start-Process $PS -ArgumentList "-nop -ep bypass -NoLogo -NoExit -f `"$($MyInvocation.MyCommand.Path)`" $args" -Verb RunAs
     exit 0
+}
+
+if ([Environment]::Is64BitProcess) {
+    $bcdedit = 'bcdedit'
+    $bcdboot = 'bcdboot'
+}
+else {
+    $bcdedit = "$env:SystemRoot\SysNative\bcdedit"
+    $bcdboot = "$env:SystemRoot\SysNative\bcdboot"
 }
 
 $System = Get-CimInstance -ClassName Win32_ComputerSystem
@@ -1252,7 +1259,7 @@ function Update-EFI_BootManager {
 
         try {
             Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
-            Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+            Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
             Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
         }
         catch {
@@ -1262,7 +1269,7 @@ function Update-EFI_BootManager {
     }
     else {
         try {
-            Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+            Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
         }
         catch {
             $_.Exception.Message
@@ -1282,7 +1289,7 @@ function Update-EFI_BootManager {
     if ($WinRE) {
         try {
             Start-Process 'reagentc' -ArgumentList "/setreimage /path $WinRE_Path" -NoNewWindow -Wait
-            Start-Process 'bcdedit' -ArgumentList "/set {default} recoverysequence {$WinRE_GUID}" -NoNewWindow -Wait
+            Start-Process $bcdedit -ArgumentList "/set {default} recoverysequence {$WinRE_GUID}" -NoNewWindow -Wait
         }
         catch {
             $_.Exception.Message
@@ -1370,7 +1377,7 @@ function Update-USB_Drive {
 
                     try {
                         Copy-Item $BCD $Backup_BCD -Force
-                        Start-Process 'bcdboot' -ArgumentList "$env:SystemRoot /s $Drive /f UEFI /bootex" -NoNewWindow -Wait
+                        Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $Drive /f UEFI /bootex" -NoNewWindow -Wait
                         Copy-Item $Backup_BCD $BCD -Force
                         Remove-Item $Backup_BCD -Force
                     }
@@ -1554,7 +1561,7 @@ $ScriptBlock = {
         exit 1
     }
 
-    $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
+    $EFI_Device = & "$bcdedit" /enum '{bootmgr}' | Select-String 'device'
 
     switch -Regex ($EFI_Device) {
         'Harddisk' {

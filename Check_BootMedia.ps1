@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.21
+.VERSION 2026.08.24
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -85,7 +85,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.21'
+$ScriptVersion = '2026.08.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -99,7 +99,7 @@ $Tab12 = ' ' * 12
 $TEMP_DIR = "$env:TEMP"
 
 $wimlib_URL = 'https://wimlib.net/downloads/wimlib-1.14.5-windows-x86_64-bin.zip'
-$wimlib_BACKUP_URL = 'https://web.archive.org/web/20260204130551/https://wimlib.net/downloads/wimlib-1.14.5-windows-x86_64-bin.zip'
+$wimlib_BACKUP_URL = 'https://web.archive.org/web/20260322074734if_/https://wimlib.net/downloads/wimlib-1.14.5-windows-x86_64-bin.zip'
 
 $wimlib_imagex = "$TEMP_DIR\wimlib-imagex.exe"
 $wimlib_dll = "$TEMP_DIR\libwim-15.dll"
@@ -111,6 +111,7 @@ $7z_exe = "$TEMP_DIR\7z.exe"
 $7z_dll = "$TEMP_DIR\7z.dll"
 
 $offlinereg_URL = 'http://erwan.labalec.fr/offlinereg/offlinereg.zip'
+$offlinereg_BACKUP_URL = 'https://web.archive.org/web/20230331060312if_/http://erwan.labalec.fr/offlinereg/offlinereg.zip'
 
 $offlinereg = "$env:TEMP\offlinereg-win32.exe"
 $offlinereg_dll = "$env:TEMP\offreg.dll"
@@ -156,14 +157,16 @@ if ($Quiet) {
 
 if ([Environment]::Is64BitProcess) {
     $UpdatesFolder = "$env:SystemRoot\System32\SecureBootUpdates"
+    $bcdedit = 'bcdedit'
 }
 else {
     $UpdatesFolder = "$env:SystemRoot\SysNative\SecureBootUpdates"
+    $bcdedit = "$env:SystemRoot\SysNative\bcdedit"
 }
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     'amd64' { $Arch = 'x64' }
-    'x86'   { $Arch = 'x86' }
+    'x86'   { if ($env:PROCESSOR_ARCHITEW6432) { $Arch = 'x64' } else { $Arch = 'x86' } }
     'arm64' { $Arch = 'aa64' }
     'arm'   { $Arch = 'aa32' }
 }
@@ -182,7 +185,7 @@ function Install-Tools {
         $ZIP_File = '{0}\{1}' -f $env:TEMP, ($wimlib_URL -split '/')[-1]
 
         try {
-            $Response = Invoke-WebRequest -UseBasicParsing -Uri $wimlib_URL -OutFile $ZIP_File -PassThru -ErrorAction Stop
+            $Response = Invoke-WebRequest -UseBasicParsing -Uri $wimlib_URL -OutFile $ZIP_File -PassThru -TimeoutSec 5 -ErrorAction Stop
         }
         catch {
         }
@@ -200,6 +203,8 @@ function Install-Tools {
             $objFolder.CopyHere("$($ZIP_File)\COPYING.libdivsufsort-lite.txt", 0x14)
         }
         catch {
+            $_.Exception.Message
+            exit 1
         }
         finally {
             Remove-Item $ZIP_File -Force
@@ -213,23 +218,34 @@ function Install-Tools {
         }
         catch {
             $_.Exception.Message
+            exit 1
         }
     }
 
     if (-not (Test-Path $offlinereg -PathType Leaf) -or -not (Test-Path $offlinereg_dll -PathType Leaf)) {
+        $ZIP_File = '{0}\{1}' -f $env:TEMP, ($offlinereg_URL -split '/')[-1]
+
         try {
-            $ZIP_File = '{0}\{1}' -f $env:TEMP, ($offlinereg_URL -split '/')[-1]
+            $Response = Invoke-WebRequest -UseBasicParsing -Uri $offlinereg_URL -OutFile $ZIP_File -PassThru -TimeoutSec 5 -ErrorAction Stop
+        }
+        catch {
+        }
 
-            Invoke-WebRequest -UseBasicParsing -Uri $offlinereg_URL -OutFile $ZIP_File
+        if ($Response.StatusCode -ne 200) {
+            Invoke-WebRequest -UseBasicParsing -Uri $offlinereg_BACKUP_URL -OutFile $ZIP_File
+        }
 
+        try {
             $objFolder.CopyHere("$($ZIP_File)\offlinereg-win32.exe", 0x14)
             $objFolder.CopyHere("$($ZIP_File)\offreg.dll", 0x14)
             $objFolder.CopyHere("$($ZIP_File)\license.txt", 0x14)
-
-            Remove-Item $ZIP_File -Force
         }
         catch {
             $_.Exception.Message
+            exit 1
+        }
+        finally {
+            Remove-Item $ZIP_File -Force
         }
     }
 }
@@ -1833,7 +1849,12 @@ function Check-WIM_File {
         "{0}Please wait while install SWM is analyzed.`n" -f $Tab4
 
         try {
-            $null = Export-WindowsImage -SourceImagePath $WIM_File -SplitImageFilePattern "$SWM_Path\install*.swm" -SourceIndex $Index -DestinationImagePath $Temp_WIM
+            if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') {
+                Start-Process 'dism' -ArgumentList "/Export-Image /SourceImageFile:`"$WIM_File`" /SWMFile:`"$SWM_Path\install*.swm`" /SourceIndex:$Index /DestinationImageFile:`"$Temp_WIM`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
+            }
+            else {
+                $null = Export-WindowsImage -SourceImagePath $WIM_File -SplitImageFilePattern "$SWM_Path\install*.swm" -SourceIndex $Index -DestinationImagePath $Temp_WIM
+            }
         }
         catch {
             $_.Exception.Message
@@ -2151,7 +2172,7 @@ function Check-DriveVolume {
 }
 
 $ScriptBlock = {
-    if (-not (Test-Path $wimlib_imagex) -or -not (Test-Path $7z_exe) -or -not (Test-Path $offlinereg)) {
+    if ((Test-Path -Path @($wimlib_imagex, $wimlib_dll, $7z_exe, $7z_dll, $offlinereg, $offlinereg_dll)) -contains $false) {
         Install-Tools
     }
 
@@ -2213,7 +2234,6 @@ $ScriptBlock = {
         'DeviceGuard (UEFI): ON'
     }
 
-    $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
     try {
         $KEK_Certs = Get-UEFICert KEK
         $db_Certs = Get-UEFICert db
@@ -2258,7 +2278,7 @@ $ScriptBlock = {
         }
     }
 
-    $EFI_Device = & bcdedit /enum '{bootmgr}' | Select-String 'device'
+    $EFI_Device = & "$bcdedit" /enum '{bootmgr}' | Select-String 'device'
 
     switch -Regex (, $EFI_Device) {
         'Harddisk' {
@@ -2351,15 +2371,8 @@ $ScriptBlock = {
             '{0}[OPTIONAL] SkuSiPolicy.p7b (for VBS) is MISSING.' -f $Tab4
         }
 
-        if ([Environment]::Is64BitProcess) {
-            if ((& bcdedit | Select-String 'winload.efi').Count -gt 1) {
-                '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
-            }
-        }
-        else {
-            if ((& "$env:SystemRoot\SysNative\bcdedit" | Select-String 'winload.efi').Count -gt 1) {
-                '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
-            }
+        if ((& "$bcdedit" | Select-String 'winload.efi').Count -gt 1) {
+            '{0}NOT RECOMMENDED for dual-boot setups.' -f $Tab4
         }
     }
 

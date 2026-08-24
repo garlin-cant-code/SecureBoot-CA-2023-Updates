@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.08.21
+$VERSION 2026.08.24
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.21'
+$ScriptVersion = '2026.08.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -262,7 +262,7 @@ if ($PSBoundParameters['Verbose']) {
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     'amd64' { $Arch = 'x64' }
-    'x86'   { $Arch = 'x86' }
+    'x86'   { if ($env:PROCESSOR_ARCHITEW6432) { $Arch = 'x64' } else { $Arch = 'x86' } }
     'arm64' { $Arch = 'aa64' }
     'arm'   { $Arch = 'aa32' }
 }
