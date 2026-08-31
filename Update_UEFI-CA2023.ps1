@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.24
+.VERSION 2026.08.31
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -99,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.24'
+$ScriptVersion = '2026.08.31'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -112,11 +112,12 @@ $CN_Regex = '(CN=)([^,]+)'
 
 $Tab4 = ' ' * 4
 
-switch ($env:PROCESSOR_ARCHITECTURE) {
+$Arch = $env:PROCESSOR_ARCHITECTURE
+
+switch ($Arch) {
     'amd64' { $EDK2_Arch = 'x64' }
-    'x86'   { if ($env:PROCESSOR_ARCHITEW6432) { $EDK2_Arch = 'x64'; $Arch = 'x64' } else { $EDK2_Arch = 'ia32' } }
+    'x86'   { if ($env:PROCESSOR_ARCHITEW6432) { $EDK2_Arch = 'x64' } else { $EDK2_Arch = 'ia32' } }
     'arm64' { $EDK2_Arch = 'aarch64' }
-    'arm'   { $EDK2_Arch = 'arm' }
 }
 
 $EDK2_Version = 'v1.6.5'
@@ -197,8 +198,8 @@ function Confirm-MinimumUBR {
         }
 
         20348 {
-            if ($UBR -lt 5020) {
-                return "Update Server 2022 to KB5082142 (Apr 2026) or later"
+            if ($UBR -lt 5256) {
+                return "Update Server 2022 to KB5094128 (Jun 2026) or later"
             }
         }
 
@@ -1277,19 +1278,23 @@ function Update-EFI_BootManager {
         }
     }
 
-    $RE_info = reagentc /info
-
-    if (($RE_info -match 'RE status:' -split ' ')[-1] -eq 'Enabled') {
-        $WinRE = $true
-
-        $WinRE_Path = ($RE_info -match 'RE location:' -split ' ')[-1]
-        $WinRE_GUID = ($RE_info -match 'identifier:' -split ' ')[-1]
+    try {
+        [xml]$XML = Get-Content -Path "$env:SystemRoot\System32\Recovery\ReAgent.xml"
+    }
+    catch {
+        $_.Exception.Message
+        exit 1
     }
 
-    if ($WinRE) {
+    if ($XML.WindowsRE.InstallState.state) {
+        $WinRE_Partition = (Get-Disk -Number $XML.WindowsRE.WinreLocation.id | Get-Partition | where { $_.Offset -eq $XML.WindowsRE.WinreLocation.offset }).PartitionNumber
+
+        $WinRE_Path = '\\?\GLOBALROOT\device\harddisk{0}\partition{1}\Recovery\WindowsRE' -f $XML.WindowsRE.WinreLocation.id, $WinRE_Partition
+        $WinRE_GUID = $XML.WindowsRE.WinreBCD.id
+
         try {
             Start-Process 'reagentc' -ArgumentList "/setreimage /path $WinRE_Path" -NoNewWindow -Wait
-            Start-Process $bcdedit -ArgumentList "/set {default} recoverysequence {$WinRE_GUID}" -NoNewWindow -Wait
+            Start-Process $bcdedit -ArgumentList "/set {default} recoverysequence $WinRE_GUID" -NoNewWindow -Wait
         }
         catch {
             $_.Exception.Message

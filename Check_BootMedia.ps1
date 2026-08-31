@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.24
+.VERSION 2026.08.31
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -85,7 +85,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.24'
+$ScriptVersion = '2026.08.31'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -168,7 +168,6 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
     'amd64' { $Arch = 'x64' }
     'x86'   { if ($env:PROCESSOR_ARCHITEW6432) { $Arch = 'x64' } else { $Arch = 'x86' } }
     'arm64' { $Arch = 'aa64' }
-    'arm'   { $Arch = 'aa32' }
 }
 
 $System = Get-CimInstance -ClassName Win32_ComputerSystem
@@ -275,8 +274,8 @@ function Confirm-MinimumUBR {
         }
 
         20348 {
-            if ($UBR -lt 5020) {
-                return "Update Server 2022 to KB5082142 (Apr 2026) or later"
+            if ($UBR -lt 5256) {
+                return "Update Server 2022 to KB5094128 (Jun 2026) or later"
             }
         }
 
@@ -1654,7 +1653,10 @@ function Validate-BootMgrFile
     if ($Verbose) {
         $Indent += $Tab4
 
-        if ($ShowAsFile) {
+        if ($script:IsMountedISO) {
+            $BootMgr_File = $BootMgr_File -replace '^[A-Z]:'
+        }
+        elseif ($ShowAsFile) {
             $BootMgr_File = $ShowAsFile
         }
 
@@ -1772,7 +1774,7 @@ function Check-CacheFolders {
     }
 
     $Macrium_WinRE_BootMgr_File = "$InstallDir\macrium\WinREFiles\media\EFI\Microsoft\Boot\bootmgfw.efi"
-    $Macrium_WinPE_BootFile = "$InstallDir\macrium\WA11KFiles\media\EFI\Boot\bootx64.efi"
+    $Macrium_WinPE_BootFile = "$InstallDir\macrium\WA11KFiles\media\EFI\Boot\boot${Arch}.efi"
 
     if ((Test-Path $Macrium_WinRE_BootMgr_File) -or (Test-Path $Macrium_WinPE_BootFile)) {
         try {
@@ -2040,7 +2042,7 @@ function Check-DriveVolume {
 
     $EFI_BootMgr_File = "$Drive\EFI\Microsoft\Boot\bootmgfw.efi"
     $EFI_BootFile = "$Drive\EFI\Boot\boot${Arch}.efi"
-    $EFI_VentoyGRUB_File = "$Drive\EFI\BOOT\grubx64_real.efi"
+    $EFI_VentoyGRUB_File = "$Drive\EFI\BOOT\grub${Arch}_real.efi"
 
     $Boot_WIM = "$Drive\sources\boot.wim"
     $Reconstruct_WIM = "$Drive\sources\Reconstruct.WIM"
@@ -2438,6 +2440,8 @@ $ScriptBlock = {
 
             switch -Regex ($FilePath) {
                 '\.iso$' {
+                    $script:IsMountedISO = $true
+
                     if (-not (Get-DiskImage -ImagePath $FilePath).Attached) {
                         try {
                             $DriveLetter = (Mount-DiskImage -ImagePath $FilePath -PassThru | Get-Volume).DriveLetter
@@ -2455,6 +2459,8 @@ $ScriptBlock = {
 
                         $Token = $false
                     }
+
+                    $script:IsMountedISO = $false
                 }
 
                 '\.(wim|esd|swm)$' {
