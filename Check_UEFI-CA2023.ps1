@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.24
+.VERSION 2026.08.31
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.24'
+$ScriptVersion = '2026.08.31'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -156,8 +156,8 @@ function Confirm-MinimumUBR {
         }
 
         20348 {
-            if ($UBR -lt 5020) {
-                return "Update Server 2022 to KB5082142 (Apr 2026) or later"
+            if ($UBR -lt 5256) {
+                return "Update Server 2022 to KB5094128 (Jun 2026) or later"
             }
         }
 
@@ -1141,49 +1141,74 @@ function Run-FiniteStateMachine {
     if (-not $PK_Untrusted -and (('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) -or $SignedKEK)) {
         $MergedFlags = $UpdateFlags -bor $RevokeFlags
 
-        if ($UpdateFlags -and $RevokeFlags) {
-            "`nOPTION 1:  DO NOTHING AND WAIT.  Windows will apply the UEFI updates (PC has supported BIOS)."
+        if (-not $SecureBoot_TaskState) {
+            if ($UpdateFlags -and $RevokeFlags) {
+                "`nOPTION 1:  DO NOTHING AND WAIT.  Windows will apply the UEFI updates (PC has supported BIOS)."
 
-            if ($RevokeFlags -band 0x80) {
-                "`nOPTION 2:  {0} WITHOUT REVOKING the [PCA 2011] cert, run the commands:`n" -f $UpdateMessage
+                if ($RevokeFlags -band 0x80) {
+                    "`nOPTION 2:  {0} WITHOUT REVOKING the [PCA 2011] cert, run the commands:`n" -f $UpdateMessage
+                }
+                else {
+                    "`nOPTION 2:  {0}, run the commands:`n" -f $UpdateMessage
+                }
+
+                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+
+                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
+                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
+
+                "`n`nOPTION 3:  {0}, run the commands:`n" -f $RevokeMessage
+
+                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+
+                if ($UpdateFlags) {
+                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $MergedFlags
+                }
+                else {
+                    '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
+                }
+
+                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
             }
-            else {
-                "`nOPTION 2:  {0}, run the commands:`n" -f $UpdateMessage
+            elseif ($UpdateFlags) {
+                "`n{0}, run the commands:`n" -f $UpdateMessage
+
+                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+
+                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
+                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
             }
+            elseif ($RevokeFlags) {
+                "`n{0}, run the commands:`n" -f $RevokeMessage
 
-            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+                if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
 
-            '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
-            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
-
-            "`n`nOPTION 3:  {0}, run the commands:`n" -f $RevokeMessage
-
-            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
-
-            if ($UpdateFlags) {
-                '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $MergedFlags
-            }
-            else {
                 '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
+                '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
             }
-
-            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
         }
-        elseif ($UpdateFlags) {
-            "`n{0}, run the commands:`n" -f $UpdateMessage
+        else {
+            if ($UpdateFlags -and $RevokeFlags) {
+                if ($RevokeFlags -band 0x80) {
+                    "`nOPTION 1:  {0} WITHOUT REVOKING the [PCA 2011] cert, run the commands:`n" -f $UpdateMessage
+                }
+                else {
+                    "`nOPTION 1:  {0}, run the commands:`n" -f $UpdateMessage
+                }
 
-            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
+                '{0}Update_UEFI-CA2023.ps1' -f $Tab4
 
-            '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $UpdateFlags
-            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
-        }
-        elseif ($RevokeFlags) {
-            "`n{0}, run the commands:`n" -f $RevokeMessage
-
-            if ($ManageBDE -ne $null) { '{0}{1}' -f $Tab4, $ManageBDE }
-
-            '{0}reg add HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Secureboot /v AvailableUpdates /t REG_DWORD /d 0x{1:x} /f' -f $Tab4, $RevokeFlags
-            '{0}powershell Start-ScheduledTask -TaskName "\Microsoft\Windows\PI\Secure-Boot-Update"' -f $Tab4
+                "`n`nOPTION 2:  {0}, run the commands:`n" -f $RevokeMessage
+                '{0}Update_UEFI-CA2023.ps1 -Revoke' -f $Tab4
+            }
+            elseif ($UpdateFlags) {
+                "`n{0}, run the commands:`n" -f $UpdateMessage
+                '{0}Update_UEFI-CA2023.ps1' -f $Tab4
+            }
+            elseif ($RevokeFlags) {
+                "`n{0}, run the commands:`n" -f $RevokeMessage
+                '{0}Update_UEFI-CA2023.ps1 -Revoke' -f $Tab4
+            }
         }
 
         if ($UpdateSkuSiPolicy) {
@@ -1219,9 +1244,9 @@ $ScriptBlock = {
         Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update' -ErrorAction Stop
     }
     catch {
-        switch -Regex ($_.Exception.Message) {
-            'disabled.'   { $SecureBoot_TaskState = 'DISABLED' }
-            'cannot find' { $SecureBoot_TaskState = 'REMOVED' }
+        switch -Regex ($_.Exception.MessageId) {
+            '0x80041326' { $SecureBoot_TaskState = 'DISABLED' }
+            '0x80070002' { $SecureBoot_TaskState = 'REMOVED' }
 
             default {
                 $_.Exception.Message
@@ -1644,16 +1669,20 @@ $ScriptBlock = {
         }
     }
 
+    Print-Header 'STATUS REPORT'
+
+    if ($SecureBoot_TaskState) {
+        "{0}Scheduled Task: `"Secure-Boot-Update`" is {1}.`n" -f $Tab4, $SecureBoot_TaskState
+    }
+
+    try {
+        $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'UEFICA2023Status'
+        '{0}Registry: "UEFICA2023Status" = {1}' -f $Tab4, $UEFICA2023Status
+    }
+    catch {
+    }
+
     if ($Unsafe_Model -and ($UpdateFlags -band 0x4)) {
-        Print-Header 'STATUS REPORT'
-
-        try {
-            $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'UEFICA2023Status'
-            '{0}Registry: "UEFICA2023Status" = {1}' -f $Tab4, $UEFICA2023Status
-        }
-        catch {
-        }
-
         if ($ConfidenceLevel) {
             '{0}Registry: "ConfidenceLevel" = {1}' -f $Tab4, $ConfidenceLevel
         }
@@ -1663,12 +1692,15 @@ $ScriptBlock = {
                 "`n{0}This device is affected by a known issue. This may require a firmware update." -f $Tab4
             }
             'Not Supported' {
-                "`n{0}This device may have a hardware or firmware limitation blocking updates." -f $Tab4
-                '{0}Please do not attempt to manually enroll Secure Boot keys.' -f $Tab4
+                "`n{0}This device may have a hardware or firmware limitation blocking certficate updates." -f $Tab4
+                '{0}DO NOT ATTEMPT to manually enroll Secure Boot keys.' -f $Tab4
             }
         }
+
+        return
     }
-    elseif ($UpdateFlags -or $RevokeFlags -or $UpdateSkuSiPolicy) {
+
+    if ($UpdateFlags -or $RevokeFlags -or $UpdateSkuSiPolicy) {
         if ($BitLocker_Enabled -and $UpdateFlags -ne 0x100) {
             $DeviceGuard_Running = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard).SecurityServicesRunning
 
@@ -1688,41 +1720,30 @@ $ScriptBlock = {
             }
 
             "Finish the UEFI steps to manually add the [KEK CA 2023] cert, if the script provided instructions.`n"
-            break
+            return
         }
 
-        Print-Header -Bold 'REQUIRED ACTION'
+        Print-Header -Bold "`nREQUIRED ACTION"
         Run-FiniteStateMachine
     }
     else {
-        Print-Header 'STATUS REPORT'
-
-        if ($SecureBoot_TaskState) {
-            "{0}Scheduled Task: `"Secure-Boot-Update`" is {1}.`n" -f $Tab4, $SecureBoot_TaskState
-        }
-
-        try {
-            $UEFICA2023Status = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'UEFICA2023Status'
-            "{0}Registry: `"UEFICA2023Status`" = {1}`n" -f $Tab4, $UEFICA2023Status
-        }
-        catch {
-        }
-
-        "{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked." -f $Tab4, $Tab4
-    }
-
-    if ($BootMedia) {
-        "`nINFO: -BootMedia checks have moved to new script 'Check_BootMedia.ps1'."
+        "`n{0}SUCCESS: UPDATES ARE FINISHED.`n{1}UEFI CA 2023 certs are present, PCA 2011 cert is revoked." -f $Tab4, $Tab4
     }
 }
 
 if ($Log) {
     $LogFile = '{0}\{1} {2} Check-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
 
-    & $ScriptBlock | Tee-Object $LogFile
+    (& $ScriptBlock) + (& { Print-Header 'INFO'; if ($BootMedia) { "{0}-BootMedia checks have moved to new script 'Check_BootMedia.ps1'." -f $Tab4 } }) | Tee-Object $LogFile
     "`nLog file saved as `"{0}`"`n" -f $LogFile
 }
 else {
     & $ScriptBlock
+
+    if ($BootMedia) {
+        Print-Header 'INFO'
+        "{0}-BootMedia checks have moved to new script 'Check_BootMedia.ps1'." -f $Tab4
+    }
+
     Write-Output ''
 }
