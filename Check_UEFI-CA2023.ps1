@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.31
+.VERSION 2026.09.04
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -38,7 +38,7 @@
     If Secure Boot is currently disabled, audit report will simulate conditions where Secure Boot is enabled.
 
 .PARAMETER Log
-    Save script output to a file named "YYYY-MM-DD [Model] Check UEFI.log"
+    Save script output to a log file named "YYYY-MM-DD [Model] Check UEFI.log"
 
 .PARAMETER BootMedia
     Boot media checks have been moved to another script "Check_BootMedia.ps1".  User will be reminded to use the other script.
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.08.31'
+$ScriptVersion = '2026.09.04'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -123,90 +123,44 @@ else {
     $bcdedit = 'bcdedit'
 }
 
-$System = Get-CimInstance -ClassName Win32_ComputerSystem
-$BIOS = Get-CimInstance -ClassName Win32_BIOS
-
-$SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
-
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
 function Confirm-MinimumUBR {
-    $Build = $CurrentVersion.CurrentBuildNumber
-    $UBR = $CurrentVersion.UBR
-    $Release = $CurrentVersion.DisplayVersion
+    $Release_List = ConvertFrom-Csv @'
+        Build, MininumUBR, Release, KB
+        14393, 9234, Server 2016, KB5094122 (Jun 2026)
+        17763, 8880, Server 2019, KB5094123 (Jun 2026)
+        19044, 7417, W10 21H2,    KB5094127 (Jun 2026)
+        19045, 7417, W10 22H2,    KB5094127 (Jun 2026)
+        20348, 5256, Server 2022, KB5094128 (Jun 2026)
+        22000, 3260, W11 21H2,    KB5044280 (Oct 2025)
+        22621, 6060, W11 22H2,    KB5066793 (Oct 2025)
+        22631, 7219, W11 23H2,    KB5093998 (Jun 2026)
+        25398, 2274, Server 23H2, KB5082060 (Apr 2026)
+        26100, 8655, W11 24H2,    KB5094126 (Jun 2026)
+        26200, 8655, W11 25H2,    KB5094126 (Jun 2026)
+        28000, 2269, W11 26H1,    KB5095051 (Jun 2026)
+'@
 
-    switch ($Build) {
-        14393 {
-            if ($UBR -lt 9234) {
-                return "Update Windows $Release to KB5094122 (Jun 2026) or later"
-            }
+    $Match = @($Release_List | where { $_.Build -eq $Build })
+
+    if ($Match.Count) {
+        if ($UBR -lt $Match.MininumUBR) {
+            return "Update $ProductName to $($Match.KB) or later"
         }
-
-        17763 {
-            if ($UBR -lt 8880) {
-                return "Update Windows $Release to KB5094123 (Jun 2026) or later"
-            }
-        }
-
-        { $_ -in 19044,19045 } {
-            if ($UBR -lt 7417) {
-                return "Update W10 $Release to KB5094127 (Jun 2026) or later"
-            }
-        }
-
-        20348 {
-            if ($UBR -lt 5256) {
-                return "Update Server 2022 to KB5094128 (Jun 2026) or later"
-            }
-        }
-
-        22000 {
-            if ($UBR -lt 3260) {
-                return "Update W11 21H2 to KB5044280 (Oct 2025) or later"
-            }
-        }
-
-        22621 {
-            if ($UBR -lt 6060) {
-                return "Update W11 $Release to KB5066793 (Oct 2025) or later"
-            }
-        }
-
-        22631 {
-            if ($UBR -lt 7219) {
-                return "Update W11 $Release to KB5093998 (Jun 2026) or later"
-            }
-        }
-
-        25398 {
-            if ($UBR -lt 2274) {
-                return "Update Server 23H2 to KB5082060 (Apr 2026) or later"
-            }
-        }
-
-        { $_ -in 26100,26200 } {
-            if ($UBR -lt 8655) {
-                return "Update W11 $Release to KB5094126 (Jun 2026) or later"
-            }
-        }
-
-        28000 {
-            if ($UBR -lt 2269) {
-                return "Update W11 26H1 to KB5095051 (Jun 2026) or later"
-            }
-        }
-
-        { $_ -gt 26200 } {
-            return "Cannot confirm if W11 $Release (${Build}.$UBR) has the latest files"
-        }
-
-        default {
-            return "Windows $Release ${Build}.$UBR is unsupported"
+        else {
+            return $true
         }
     }
-
-    return $true
+    else {
+        if ($Build -gt 26200) {
+            return "Cannot confirm if $ProductName (${Build}.$UBR) has the latest files"
+        }
+        else {
+            return "$ProductName (${Build}.$UBR) is unsupported"
+        }
+    }
 }
 
 function Get-HarddiskVolume {
@@ -506,7 +460,7 @@ function Get-UEFICert {
 
     if ($Variable -match 'PK') {
         if ($SignatureList.SignatureData -eq $null -and $SignatureList.SignatureOwner.Guid -eq $VMWARE_GUID) {
-            $Certs = @('VMware Default PK')
+            $Certs = @('VMware NULL PK')
         }
         elseif ($Subject -match 'VirtualBox') {
             $Certs = @('VirtualBox UEFI PK')
@@ -1237,8 +1191,6 @@ function Run-FiniteStateMachine {
 }
 
 $ScriptBlock = {
-    $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
-
     # Force a refresh of reg key 'WindowsUEFICA2023Capable'
     try {
         Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update' -ErrorAction Stop
@@ -1255,9 +1207,21 @@ $ScriptBlock = {
         }
     }
 
+    $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
+
+    $Build = $CurrentVersion.CurrentBuildNumber
+    $UBR = $CurrentVersion.UBR
+    $ProductName = $CurrentVersion.ProductName
+    $DisplayVersion = $CurrentVersion.DisplayVersion
+
+    switch -Regex ($ProductName) {
+        'Server'  { $ProductName = ($ProductName -split ' ')[1..2] -join ' ' }
+        'LTS'     { $ProductName = $ProductName -replace 'Windows ','W' -replace 'Enterprise','ENT' }
+         default  { $ProductName = 'Windows {0} {1}' -f $(if ($Build -lt 22000) { '10' } else { '11' }), $DisplayVersion }
+    }
+
     if ($Verbose) {
-        $CurrentBuild = $CurrentVersion.CurrentBuildNumber
-        "Windows {0} {1} ({2}.{3})`n" -f $(if ($CurrentBuild -lt 22000) { '10' } else { '11' }), $CurrentVersion.DisplayVersion, $CurrentBuild, $CurrentVersion.UBR
+        '{0} ({1}.{2})' -f $ProductName, $Build, $UBR
     }
 
     try {
@@ -1300,6 +1264,8 @@ $ScriptBlock = {
     }
 
     try {
+        $SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
+
         $ProtectionStatus = ([string](Get-BitLockerVolume -MountPoint $SystemDrive).ProtectionStatus).ToUpper()
         $ManageBDECount = (Get-CimInstance -Namespace 'ROOT/CIMV2/Security/MicrosoftVolumeEncryption' -Class Win32_EncryptableVolume -Filter "DriveLetter=`"$SystemDrive`"" | Invoke-CimMethod -MethodName 'GetSuspendCount').SuspendCount
 
@@ -1349,6 +1315,9 @@ $ScriptBlock = {
         exit 1
     }
 
+    $System = Get-CimInstance -ClassName Win32_ComputerSystem
+    $BIOS = Get-CimInstance -ClassName Win32_BIOS
+
     $Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
     $BIOS_Version = $BIOS.SMBIOSBIOSVersion
 
@@ -1366,6 +1335,7 @@ $ScriptBlock = {
         }
 
         switch -Regex ($Model) {
+            'EliteBook 850 G5' { $Unsafe_Model = $true }
             'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
             'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
 
@@ -1732,9 +1702,11 @@ $ScriptBlock = {
 }
 
 if ($Log) {
-    $LogFile = '{0}\{1} {2} Check-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
+    $Model = (Get-CimInstance -ClassName Win32_ComputerSystem).Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_'
 
-    (& $ScriptBlock) + (& { Print-Header 'INFO'; if ($BootMedia) { "{0}-BootMedia checks have moved to new script 'Check_BootMedia.ps1'." -f $Tab4 } }) | Tee-Object $LogFile
+    $LogFile = '{0}\{1} {2} Check-UEFI.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), $Model
+
+    (& $ScriptBlock) + $(if ($BootMedia) { Print-Header 'INFO'; "{0}-BootMedia checks have moved to new script 'Check_BootMedia.ps1'." -f $Tab4 }) | Tee-Object $LogFile
     "`nLog file saved as `"{0}`"`n" -f $LogFile
 }
 else {

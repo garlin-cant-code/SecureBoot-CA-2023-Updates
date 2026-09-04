@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.08.31
+.VERSION 2026.09.04
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -16,38 +16,37 @@
 
 <#
 .SYNOPSIS
-    Script to identify Secure Boot compliance with Windows Boot Manager and other boot files located on USB boot media,
-    and individual WIM or ISO files.
+    Script to identify Secure Boot CA 2023 and SkuSiPolicy compliance with Windows Boot Manager and other boot files located on
+    various USB boot media, individual WIM or ISO files.
 
 .DESCRIPTION
-    Run this script to check boot media, WIM or ISO file's compliance with Secure Boot CA 2023 updates, and CA 2011 revocation.
+    Run this script to check if your boot media, WIM or ISO files are in compliance with Secure Boot CA 2023 updates, and CA 2011 revocation.
 
 .PARAMETER Version
     Print the script's version number and exit.
 
 .PARAMETER Verbose
-    Identify extra details including the Windows Boot Manager file version and SVN, winload.efi file version, and
-    current SkuSiPolicy rules (if file deployed to the EFI volume).
+    Identify extra details including the Windows Boot Manager's file version and SVN, winload.efi file version, and current SkuSiPolicy rules
+    (if policy file is deployed to the EFI volume).
 
 .PARAMETER Quiet
-    Remove all reporting tags for "is ALLOWED", and only display "is BANNED" for quicker review.
+    Remove all reporting tags for "ALLOWED", and only display "BANNED" for quicker review.
 
 .PARAMETER Audit
-    If Secure Boot or VBS are currently disabled, report will simulate conditions where Secure Boot and VBS are enabled.
+    If Secure Boot or VBS are currently disabled, report will simulate conditions where both Secure Boot and VBS are enabled.
 
 .PARAMETER NoSkip
-    When checking Windows install files, examine every image in the WIM/ESD file.  By default, the script stops checking after
-    the first image of each install file to improve script reporting times.
+    When checking Windows install files (WIM/ESD/SWM), report on every image in the file.  By default, the script stops checking after the first image
+    of each install file for faster script reporting times.
 
 .PARAMETER Log
-    Save script output to a file named "YYYY-MM-DD [Model] Check BootMedia.log"
+    Save script output to a log file named "YYYY-MM-DD [Model] Check BootMedia.log"
 
 .PARAMETER WinRE
     Check the system's active Windows Recovery image (Winre.wim) and exit.
 
 .PARAMETER Paths
-    Check an optional list of WIM or ISO files submitted on the command line.  When this option is used, checking for removable drives
-    will be skipped.
+    Check an optional list of WIM or ISO files submitted on the command line.  When this option is used, checking for removable drives will be skipped.
 
 .EXAMPLE
     Check_BootMedia.ps1
@@ -85,7 +84,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.31'
+$ScriptVersion = '2026.09.04'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -170,9 +169,6 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
     'arm64' { $Arch = 'aa64' }
 }
 
-$System = Get-CimInstance -ClassName Win32_ComputerSystem
-$SystemDrive = (Get-CimInstance -ClassName Win32_OperatingSystem).SystemDrive
-
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
@@ -250,81 +246,40 @@ function Install-Tools {
 }
 
 function Confirm-MinimumUBR {
-    $Build = $CurrentVersion.CurrentBuildNumber
-    $UBR = $CurrentVersion.UBR
-    $Release = $CurrentVersion.DisplayVersion
+    $Release_List = ConvertFrom-Csv @'
+        Build, MininumUBR, Release, KB
+        14393, 9234, Server 2016, KB5094122 (Jun 2026)
+        17763, 8880, Server 2019, KB5094123 (Jun 2026)
+        19044, 7417, W10 21H2,    KB5094127 (Jun 2026)
+        19045, 7417, W10 22H2,    KB5094127 (Jun 2026)
+        20348, 5256, Server 2022, KB5094128 (Jun 2026)
+        22000, 3260, W11 21H2,    KB5044280 (Oct 2025)
+        22621, 6060, W11 22H2,    KB5066793 (Oct 2025)
+        22631, 7219, W11 23H2,    KB5093998 (Jun 2026)
+        25398, 2274, Server 23H2, KB5082060 (Apr 2026)
+        26100, 8655, W11 24H2,    KB5094126 (Jun 2026)
+        26200, 8655, W11 25H2,    KB5094126 (Jun 2026)
+        28000, 2269, W11 26H1,    KB5095051 (Jun 2026)
+'@
 
-    switch ($Build) {
-        14393 {
-            if ($UBR -lt 9234) {
-                return "Update Windows $Release to KB5094122 (Jun 2026) or later"
-            }
+    $Match = @($Release_List | where { $_.Build -eq $Build })
+
+    if ($Match.Count) {
+        if ($UBR -lt $Match.MininumUBR) {
+            return "Update $ProductName to $($Match.KB) or later"
         }
-
-        17763 {
-            if ($UBR -lt 8880) {
-                return "Update Windows $Release to KB5094123 (Jun 2026) or later"
-            }
-        }
-
-        { $_ -in 19044,19045 } {
-            if ($UBR -lt 7417) {
-                return "Update W10 $Release to KB5094127 (Jun 2026) or later"
-            }
-        }
-
-        20348 {
-            if ($UBR -lt 5256) {
-                return "Update Server 2022 to KB5094128 (Jun 2026) or later"
-            }
-        }
-
-        22000 {
-            if ($UBR -lt 3260) {
-                return "Update W11 21H2 to KB5044280 (Oct 2025) or later"
-            }
-        }
-
-        22621 {
-            if ($UBR -lt 6060) {
-                return "Update W11 $Release to KB5066793 (Oct 2025) or later"
-            }
-        }
-
-        22631 {
-            if ($UBR -lt 7219) {
-                return "Update W11 $Release to KB5093998 (Jun 2026) or later"
-            }
-        }
-
-        25398 {
-            if ($UBR -lt 2274) {
-                return "Update Server 23H2 to KB5082060 (Apr 2026) or later"
-            }
-        }
-
-        { $_ -in 26100,26200 } {
-            if ($UBR -lt 8655) {
-                return "Update W11 $Release to KB5094126 (Jun 2026) or later"
-            }
-        }
-
-        28000 {
-            if ($UBR -lt 2269) {
-                return "Update W11 26H1 to KB5095051 (Jun 2026) or later"
-            }
-        }
-
-        { $_ -gt 26200 } {
-            return "Cannot confirm if W11 $Release (${Build}.$UBR) has the latest files"
-        }
-
-        default {
-            return "Windows $Release ${Build}.$UBR is unsupported"
+        else {
+            return $true
         }
     }
-
-    return $true
+    else {
+        if ($Build -gt 26200) {
+            return "Cannot confirm if $ProductName (${Build}.$UBR) has the latest files"
+        }
+        else {
+            return "$ProductName (${Build}.$UBR) is unsupported"
+        }
+    }
 }
 
 function Get-HarddiskVolume {
@@ -1844,6 +1799,13 @@ function Check-WIM_File {
 
     $Extract_Files = '/Windows/Boot/EFI/bootmgfw.efi /Windows/Boot/EFI_EX/bootmgfw_EX.efi /Windows/System32/config/SOFTWARE /Windows/System32/winload.efi'
 
+    $Quiet_Params = @{
+        RedirectStandardOut = 'NUL'
+        RedirectStandardError = '\\.\NUL'
+        NoNewWindow = $true
+        Wait = $true
+    }
+
     if ($WIM_File -match '.swm$') {
         $SWM_Path = Split-Path $WIM_File
         $Temp_WIM = "$TEMP_DIR\install.{0}.wim" -f [System.IO.Path]::GetRandomFileName()
@@ -1852,7 +1814,7 @@ function Check-WIM_File {
 
         try {
             if ($env:PROCESSOR_ARCHITECTURE -eq 'x86') {
-                Start-Process 'dism' -ArgumentList "/Export-Image /SourceImageFile:`"$WIM_File`" /SWMFile:`"$SWM_Path\install*.swm`" /SourceIndex:$Index /DestinationImageFile:`"$Temp_WIM`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
+                Start-Process 'dism' -ArgumentList "/Export-Image /SourceImageFile:`"$WIM_File`" /SWMFile:`"$SWM_Path\install*.swm`" /SourceIndex:$Index /DestinationImageFile:`"$Temp_WIM`"" @Quiet_Params
             }
             else {
                 $null = Export-WindowsImage -SourceImagePath $WIM_File -SplitImageFilePattern "$SWM_Path\install*.swm" -SourceIndex $Index -DestinationImagePath $Temp_WIM
@@ -1865,29 +1827,33 @@ function Check-WIM_File {
 
         Start-Sleep 2
         $Extract_Files = $Extract_Files -replace '/Windows','Windows'
-        Start-Process $7z_exe -ArgumentList "e $Temp_WIM -aoa $Extract_Files -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
+        Start-Process $7z_exe -ArgumentList "e $Temp_WIM -aoa $Extract_Files -o`"$TEMP_DIR`"" @Quiet_Params
     }
     elseif ($WIM_File -match 'Reconstruct.WIM') {
         $WIM_Path = Split-Path $WIM_File
         $WIM_List = @((Get-ChildItem "$WIM_Path\Reconstruct.*" -Force -ErrorAction SilentlyContinue).FullName)
 
-        $WinSxS = @(foreach ($ReconstructWIM in $WIM_List) {
-             & $7z_exe l $ReconstructWIM | Select-String "[0-9a-f]\\bootmgfw_EX.efi$" | foreach {
-                 [PSCustomObject] @{
-                     WIM_File = $ReconstructWIM
-                     Component_File = ($_ -split ' ')[-1]
-                 }
-             }
-        }) | sort Component_File | select -Last 1
+        $WinSxS = @()
 
-        Start-Process $7z_exe -ArgumentList "e $($WinSxS.WIM_File) -aoa $($WinSxS.Component_File) -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
-        Start-Process $7z_exe -ArgumentList "e $WIM_File -aoa Windows\System32\config\SOFTWARE Windows\System32\winload.efi -o`"$TEMP_DIR`"" -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
+        foreach ($ReconstructWIM in $WIM_List) {
+            Start-Process $7z_exe -ArgumentList "e $ReconstructWIM -aoa Windows\System32\config\SOFTWARE Windows\System32\winload.efi -o`"$TEMP_DIR`"" @Quiet_Params
+
+            & $7z_exe l $ReconstructWIM | Select-String "[0-9a-f]\\bootmgfw_EX.efi$" | foreach {
+                $WinSxS += [PSCustomObject] @{
+                    WIM_File = $ReconstructWIM
+                    Component_File = ($_ -split ' ')[-1]
+                }
+            }
+        }
+
+        $WinSxS_Winner = $WinSxS | sort Component_File | select -Last 1
+        Start-Process $7z_exe -ArgumentList "e $($WinSxS_Winner.WIM_File) -aoa $($WinSxS_Winner.Component_File) -o`"$TEMP_DIR`"" @Quiet_Params
     }
     else {
         $ArgumentList = "extract `"$WIM_File`" $Index $Extract_Files --quiet --nullglob --no-acls --dest-dir=`"$env:TEMP`""
 
         try {
-            Start-Process $wimlib_imagex -ArgumentList $ArgumentList -RedirectStandardOut NUL -RedirectStandardError '\\.\NUL' -NoNewWindow -Wait
+            Start-Process $wimlib_imagex -ArgumentList $ArgumentList @Quiet_Params
         }
         catch {
             $_.Exception.Message
@@ -1916,21 +1882,13 @@ function Check-WIM_File {
         $UBR = (($CurrentVersion | Select-String 'UBR') -split ':')[-1]
     }
 
+    $ProductName = (($CurrentVersion | Select-String '"ProductName"') -split '"')[3]
     $DisplayVersion = (($CurrentVersion | Select-String '"DisplayVersion"') -split '"')[3]
 
-    switch ($Build) {
-        19041 { $Release = "W10 20H1" }
-        19042 { $Release = "W10 20H2" }
-        19043 { $Release = "W10 21H2" }
-        19044 { $Release = "W10 22H2" }
-
-        { $_ -ge 22000 } {
-            $Release = "W11 $DisplayVersion"
-        }
-
-        default {
-            $Release = "Windows $DisplayVersion"
-        }
+    switch -Regex ($ProductName) {
+        'Server'  { $ProductName = ($ProductName -split ' ')[1..2] -join ' ' }
+        'LTS'     { $ProductName = $ProductName -replace 'Windows ','W' -replace 'Enterprise','ENT' }
+         default  { $ProductName = 'W{0} {1}' -f $(if ($Build -lt 22000) { '10' } else { '11' }), $DisplayVersion }
     }
 
     $Temp_BootMgrEX_File = "$env:TEMP\bootmgfw_EX.efi"
@@ -1962,7 +1920,7 @@ function Check-WIM_File {
         '{0}{1}:{2} ({3} {4}.{5}) ' -f $Indent1, $Filename, $Index, $WIM_Type, $Build, $UBR
     }
     else {
-        '{0}{1}:{2} ({3} {4}.{5}) ' -f $Indent1, $Filename, $Index, $Release, $Build, $UBR
+        '{0}{1}:{2} ({3} {4}.{5}) ' -f $Indent1, $Filename, $Index, $ProductName, $Build, $UBR
     }
 
     if (Test-Path $Temp_BootMgrEX_File) {
@@ -2126,6 +2084,8 @@ function Check-DriveVolume {
 
     if (Test-Path $Reconstruct_WIM) {
         Check-WIM_File -WIM_File $Reconstruct_WIM -Index 1
+        if ($Verbose) { Write-Output '' }
+
         return
     }
 
@@ -2180,9 +2140,19 @@ $ScriptBlock = {
 
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
 
+    $Build = $CurrentVersion.CurrentBuildNumber
+    $UBR = $CurrentVersion.UBR
+    $ProductName = $CurrentVersion.ProductName
+    $DisplayVersion = $CurrentVersion.DisplayVersion
+
+    switch -Regex ($ProductName) {
+        'Server'  { $ProductName = ($ProductName -split ' ')[1..2] -join ' ' }
+        'LTS'     { $ProductName = $ProductName -replace 'Windows ','W' -replace 'Enterprise','ENT' }
+         default  { $ProductName = 'Windows {0} {1}' -f $(if ($Build -lt 22000) { '10' } else { '11' }), $DisplayVersion }
+    }
+
     if ($Verbose) {
-        $CurrentBuild = $CurrentVersion.CurrentBuildNumber
-        "Windows {0} {1} ({2}.{3})`n" -f $(if ($CurrentBuild -lt 22000) { '10' } else { '11' }), $CurrentVersion.DisplayVersion, $CurrentBuild, $CurrentVersion.UBR
+        '{0} ({1}.{2})' -f $ProductName, $Build, $UBR
     }
 
     $Result = Confirm-MinimumUBR
@@ -2246,8 +2216,6 @@ $ScriptBlock = {
         $_.Exception.Message
         exit 1
     }
-
-    $Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
 
     foreach ($Variable in 'PK','KEK','db','dbx') {
         try {
@@ -2514,7 +2482,9 @@ $ScriptBlock = {
 }
 
 if ($Log) {
-    $LogFile = '{0}\{1} {2} Check-BootMedia.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
+    $Model = (Get-CimInstance -ClassName Win32_ComputerSystem).Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_'
+
+    $LogFile = '{0}\{1} {2} Check-BootMedia.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), $Model
 
     & $ScriptBlock | Tee-Object $LogFile
     "`nLog file saved as `"{0}`"`n" -f $LogFile
