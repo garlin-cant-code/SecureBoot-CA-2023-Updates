@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.08.31
+$VERSION 2026.09.04
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -31,7 +31,7 @@ $VERSION 2026.08.31
     Identify if unmatched signatures contain a higher DBX SVN, than currently stored in UEFI DBX.
 
 .PARAMETER Log
-    Save script output to a file named "YYYY-MM-DD [Model] Check DBX.log"
+    Save script output to a log file named "YYYY-MM-DD [Model] Check DBX.log"
 
 .PARAMETER Paths
     Search a list of provided folder paths or individual filenames, for DBX Update files and check each file for confirmation that UEFI DBX
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.08.31'
+$ScriptVersion = '2026.09.04'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -265,8 +265,6 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
     'x86'   { if ($env:PROCESSOR_ARCHITEW6432) { $Arch = 'x64' } else { $Arch = 'ia32' } }
     'arm64' { $Arch = 'aarch64' }
 }
-
-$System = Get-CimInstance -ClassName Win32_ComputerSystem
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
@@ -691,7 +689,9 @@ if ($Verbose) {
     }
 }
 
-$LogFile = '{0}\{1} {2} Check-DBXUpdate.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), ($System.Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_')
+$Model = (Get-CimInstance -ClassName Win32_ComputerSystem).Model.ToUpper().Split([IO.Path]::GetInvalidFileNameChars()) -join '_'
+
+$LogFile = '{0}\{1} {2} Check-DBXUpdate.log' -f $PSScriptRoot, (Get-Date -Format 'yyyy-MM-dd'), $Model
 
 if (Test-Path $LogFile) {
     Remove-Item $LogFile -Force
@@ -749,7 +749,7 @@ foreach ($item in $Paths) {
 
         if (Test-Path $Path -PathType Container) {
             foreach ($File in (Resolve-Path (Get-ChildItem $Path -Force -File).FullName -Relative)) {
-                if ($File -match '(.*dbx.*)\.bin$') {
+                if ($File -match '(.*dbx.*)\.(bin|efiauth2)$') {
                     $DBX_Files += [PSCustomObject]@{
                         RelativePath = $File
                         FullPath = (Get-Item $File -Force).FullName
@@ -800,8 +800,13 @@ foreach ($item in $Paths) {
     }
 }
 
-foreach ($File in ($DBX_Files | sort FullPath -Unique | sort SortKey)) {
-    Compare-DBXSignatureData $File -ShowPath $ShowPath
+if ($DBX_Files.Count) {
+    foreach ($File in ($DBX_Files | sort FullPath -Unique | sort SortKey)) {
+        Compare-DBXSignatureData $File -ShowPath $ShowPath
+    }
+}
+else {
+    'No DBX update files found.'
 }
 
 if ($Log) {
