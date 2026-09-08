@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.04
+.VERSION 2026.09.08
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.09.04'
+$ScriptVersion = '2026.09.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -673,11 +673,11 @@ function Match-DBXSignatureData {
         return $true
     }
 
-    $Matched = 0
+    $MatchingCount = 0
 
     foreach ($RequiredSig in $RequiredSignatureData) {
         if ($DBXSignatureData -contains $RequiredSig) {
-            $Matched++
+            $MatchingCount++
         }
         else {
             switch -Regex ($RequiredSig) {
@@ -686,7 +686,7 @@ function Match-DBXSignatureData {
                     $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                 }
 
@@ -695,7 +695,7 @@ function Match-DBXSignatureData {
                     $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                 }
 
@@ -704,14 +704,14 @@ function Match-DBXSignatureData {
                     $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                 }
             }
         }
     }
 
-    if ($Matched -eq $RequiredCount) {
+    if ($MatchingCount -eq $RequiredCount) {
         return $true
     }
     else {

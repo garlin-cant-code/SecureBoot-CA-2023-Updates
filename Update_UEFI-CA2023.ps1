@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.04
+.VERSION 2026.09.08
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -44,7 +44,7 @@
     To allow dual-booting of [Production PCA 2011] & [UEFI CA 2023] media, do not use the -Revoke option.
 
 .PARAMETER Latest
-    Download latest version of DBXUpdate.bin and DBXUpdateSVN.bin, from Microsoft's Secure Boot Objects GitHub before proceeding.
+    Download latest version of dbxupdate.bin and DBXUpdateSVN.bin, from Microsoft's Secure Boot Objects GitHub before proceeding.
 
 .PARAMETER SkuSiPolicy
     Deploy \Windows\System32\SecureBootUpdates\SkuSiPolicy.p7b to EFI partition.
@@ -99,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.09.04'
+$ScriptVersion = '2026.09.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -128,9 +128,7 @@ $PK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/ma
 $KEKUpdateMap_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/kek_update_map.json'
 $KEK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/KEK/Certificates/microsoft%20corporation%20kek%202k%20ca%202023.der'
 
-$DBXUpdate_SignedByKEK2011_URL = "https://api.github.com/repos/microsoft/secureboot_objects/contents/PostSignedObjects/SignedByKEK2011/dbx_${EDK2_Arch}_Legacy"
 $DBXUpdate_SignedByKEK2023_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/refs/heads/main/PostSignedObjects/SignedByKEK2023/dbx_${EDK2_Arch}.efiauth2"
-
 $DBXUpdateSVN_bin_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/Optional/DBX/DBXUpdateSVN.bin'
 
 if ($Version) {
@@ -170,8 +168,12 @@ else {
     $bcdboot = 'bcdboot'
 }
 
+$SystemLocale = (Get-WinSystemLocale).Name
+
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
+
+$TEMP_DIR = "$env:TEMP"
 
 function Confirm-MinimumUBR {
     $Release_List = ConvertFrom-Csv @'
@@ -726,11 +728,11 @@ function Match-DBXSignatureData {
         return $true
     }
 
-    $Matched = 0
+    $MatchingCount = 0
 
     foreach ($RequiredSig in $RequiredSignatureData) {
         if ($DBXSignatureData -contains $RequiredSig) {
-            $Matched++
+            $MatchingCount++
         }
         else {
             switch -Regex ($RequiredSig) {
@@ -739,7 +741,7 @@ function Match-DBXSignatureData {
                     $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                 }
 
@@ -748,7 +750,7 @@ function Match-DBXSignatureData {
                     $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                 }
 
@@ -757,14 +759,14 @@ function Match-DBXSignatureData {
                     $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                 }
             }
         }
     }
 
-    if ($Matched -eq $RequiredCount) {
+    if ($MatchingCount -eq $RequiredCount) {
         return $true
     }
     else {
@@ -1035,8 +1037,8 @@ function Append-SecureBootSignedFile {
         $offset = 0
     }
 
-    $SigFile = '{0}\{1}.signature.p7' -f $env:TEMP, $CertName
-    $ContentFile = '{0}\{1}.content.bin' -f $env:TEMP, $CertName
+    $SigFile = '{0}\{1}.signature.p7' -f $TEMP_DIR, $CertName
+    $ContentFile = '{0}\{1}.content.bin' -f $TEMP_DIR, $CertName
 
     # Build and write signature output file
     if ($PSVersion -gt 5) {
@@ -1101,7 +1103,7 @@ function Update-PK_Cert {
     # Pre-signed object for Windows OEM Devices PK
 
     $CertFile = 'WindowsOEMDevicesPK.der'
-    $PreSignedObj_File = "$env:TEMP\$CertFile"
+    $PreSignedObj_File = "$TEMP_DIR\$CertFile"
 
     if (-not (Test-Path -LiteralPath "$EFI_FolderPath\$CertFile")) {
         try {
@@ -1156,7 +1158,7 @@ function Update-KEK_Cert {
         $KEK_Update = $array[1]
 
         $KEK_BIN_URL = "https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/KEK/$Vendor/$KEK_Update"
-        $PostSignedObj_File = "$env:TEMP\$KEK_Update"
+        $PostSignedObj_File = "$TEMP_DIR\$KEK_Update"
 
         try {
             'Downloading "{0}" from GitHub.' -f $KEK_Update
@@ -1175,7 +1177,7 @@ function Update-KEK_Cert {
         # Pre-signed object for KEK 2K CA 2023
 
         $CertFile = 'Microsoft Corporation KEK 2K CA 2023.der'
-        $PreSignedObj_File = "$env:TEMP\$CertFile"
+        $PreSignedObj_File = "$TEMP_DIR\$CertFile"
 
         if (-not (Test-Path -LiteralPath "$EFI_FolderPath\$CertFile")) {
             try {
@@ -1217,10 +1219,18 @@ function Update-EFI_BootManager {
             exit 1
         }
 
+        $BCD = "$EFI_DriveLetter\EFI\Microsoft\Boot\BCD"
+        $Backup_BCD = "$TEMP_DIR\BCD.BAK"
+
         try {
             Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
-            Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+
+            Copy-Item $BCD $Backup_BCD -Force
+            Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex /l $SystemLocale" -NoNewWindow -Wait
+            Copy-Item $Backup_BCD $BCD -Force
+
             Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
+            Remove-Item $Backup_BCD -Force
         }
         catch {
             $_.Exception.Message
@@ -1229,7 +1239,7 @@ function Update-EFI_BootManager {
     }
     else {
         try {
-            Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex" -NoNewWindow -Wait
+            Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex /l $SystemLocale" -NoNewWindow -Wait
         }
         catch {
             $_.Exception.Message
@@ -1337,12 +1347,13 @@ function Update-USB_Drive {
                     }
 
                     $BCD = "$EFI_Path\Microsoft\Boot\BCD"
-                    $Backup_BCD = "$env:TEMP\BCD.BAK"
+                    $Backup_BCD = "$TEMP_DIR\BCD.BAK"
 
                     try {
                         Copy-Item $BCD $Backup_BCD -Force
-                        Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $Drive /f UEFI /bootex" -NoNewWindow -Wait
+                        Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $Drive /f UEFI /bootex /l $SystemLocale" -NoNewWindow -Wait
                         Copy-Item $Backup_BCD $BCD -Force
+
                         Remove-Item $Backup_BCD -Force
                     }
                     catch {
@@ -1600,7 +1611,7 @@ $ScriptBlock = {
     }
 
     if ($PK_BytesCount -eq 0 -and ($KEK_BytesCount -eq 0 -or $db_BytesCount -eq 0 -or $dbx_BytesCount -eq 0)) {
-        $EDK2_Folder = "$env:TEMP\EDK2_bin"
+        $EDK2_Folder = "$TEMP_DIR\EDK2_bin"
         Download-EDK2bin
 
         if ($db_BytesCount -eq 0) {
@@ -1662,34 +1673,16 @@ $ScriptBlock = {
         }
 
         if ($Latest) {
-            $DBXUpdate_bin = @()
-            $DBXUpdateSVN_bin = "$env:TEMP\DBXUpdateSVN.bin"
+            $Filename = ($DBXUpdate_SignedByKEK2023_URL -split '/')[-1]
+
+            $DBXUpdate_bin = "$TEMP_DIR\$Filename"
+            $DBXUpdateSVN_bin = "$TEMP_DIR\DBXUpdateSVN.bin"
 
             try {
-                if ('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) {
-                    $GitHub_File = ($DBXUpdate_SignedByKEK2023_URL -split '/')[-1]
+                'Downloading "{0}" from GitHub.' -f $Filename
+                Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_SignedByKEK2023_URL -OutFile $DBXUpdate_bin
 
-                    'Downloading "{0}" from GitHub.' -f $GitHub_File
-                    $Update_File = "$env:TEMP\$GitHub_File"
-
-                    Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_SignedByKEK2023_URL -OutFile $Update_File
-                    $DBXUpdate_bin += $Update_File
-                }
-                else {
-                    $JSON = (Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_SignedByKEK2011_URL).Content | ConvertFrom-Json
-
-                    foreach ($item in @($JSON | sort { if ($_.name -match 'Legacy') { 0 } else { 1 } }, Name)) {
-                        $GitHub_File = $($item.name)
-
-                        'Downloading "{0}" from GitHub.' -f $GitHub_File
-                        $Update_File = "$env:TEMP\$GitHub_File"
-
-                        Invoke-WebRequest -UseBasicParsing -Uri $item.download_url -OutFile $Update_File
-                        $DBXUpdate_bin += $Update_File
-                    }
-                }
-
-                'Downloading "DBXUpdateSVN.bin" from GitHub.'
+                "Downloading `"DBXUpdateSVN.bin`" from GitHub.`n"
                 Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdateSVN_bin_URL -OutFile $DBXUpdateSVN_bin
             }
             catch {
@@ -1698,7 +1691,7 @@ $ScriptBlock = {
             }
         }
         else {
-            $DBXUpdate_bin = @("$UpdatesFolder\dbxupdate.bin")
+            $DBXUpdate_bin = "$UpdatesFolder\dbxupdate.bin"
             $DBXUpdateSVN_bin = "$UpdatesFolder\DBXUpdateSVN.bin"
         }
 
@@ -1714,19 +1707,11 @@ $ScriptBlock = {
             }
         }
 
-        if ($Latest) {
-            Write-Output ''
+        if (-not $(Match-DBXSignatureData $DBXUpdate_bin)) {
+            Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
         }
-
-        foreach ($Update_File in $DBXUpdate_bin) {
-            if (-not $(Match-DBXSignatureData $Update_File)) {
-                Append-SecureBootSignedFile -Variable dbx -Filename $Update_File
-            }
-            elseif ($Latest) {
-                if ('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) {
-                    '"{0}" is not a newer version.' -f (Split-Path $Update_File -Leaf)
-                }
-            }
+        elseif ($Latest) {
+            '"{0}" is not a newer version.' -f (Split-Path $DBXUpdate_bin -Leaf)
         }
 
         if ('Microsoft Windows Production PCA 2011' -notin (Get-UEFICert dbx)) {
@@ -1745,14 +1730,11 @@ $ScriptBlock = {
                 '"DBXUpdateSVN.bin" is not a newer version.'
             }
         }
-    }
 
-    if ($Latest) {
-        foreach ($Update_File in $DBXUpdate_bin) {
-            Remove-Item $Update_File -Force
+        if ($Latest) {
+            Remove-Item $DBXUpdate_bin -Force
+            Remove-Item $DBXUpdateSVN_bin -Force
         }
-
-        Remove-Item $DBXUpdateSVN_bin -Force
     }
 
     $AvailableUpdates = 0
@@ -1860,13 +1842,22 @@ $ScriptBlock = {
 
         if ($Task_Updated -eq $null) {
             'SUCCESS: NO UPDATES ARE REQUIRED.'
-            return
         }
         else {
             'SUCCESS: NO CRITICAL UPDATES ARE REQUIRED.'
-            return
         }
+
+        try {
+            $null = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'Update_UEFI-CA2023'
+            "`nRestart Windows, for pending updates to take effect."
+        }
+        catch {
+        }
+
+        return
     }
+
+    if ($UEFI_Updated) { '' }
 
     Print-Header 'REQUIRED ACTION'
 
@@ -1886,6 +1877,7 @@ $ScriptBlock = {
         }
     }
     else {
+        $null = New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'Update_UEFI-CA2023' -Force
         'Restart Windows, for UEFI updates to take effect.'
     }
 }
