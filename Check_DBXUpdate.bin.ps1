@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.09.04
+$VERSION 2026.09.08
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -42,7 +42,7 @@ $VERSION 2026.09.04
 .EXAMPLE
     Check_DBXUpdate.bin.ps1
 .EXAMPLE
-    Check_DBXUpdate.bin.ps1 \path\Folder1 \path\DBXUpdate2.bin
+    Check_DBXUpdate.bin.ps1 \path\Folder1 \path\dbxupdate2.bin
 .EXAMPLE
     Check_DBXUpdate.bin.ps1 -Verbose -Log
 #>
@@ -59,16 +59,18 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.09.04'
+$ScriptVersion = '2026.09.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
 $EFI_CDBOOT_SVN_GUID =  '019D2EF8E827E15841A4884C18ABE2F284'
 $EFI_WDSMGR_SVN_GUID =  '01C2CA99C9FE7F6F4981279E2A8A535976'
 
+$CN_Regex = '(CN=)([^,]+)'
+
 $DBXinfo_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/DBX/dbx_info_msft_latest.json'
 
-<#  April 2026 LCU's DBXupdate.bin retired (2) sets of EFI_CERT_SHA256_GUID's
+<#  April 2026 LCU's dbxupdate.bin retired (2) sets of EFI_CERT_SHA256_GUID's
         1. Microsoft 2023-05-01
         2. Canonical 2020-07-01
 #>
@@ -453,6 +455,48 @@ function Get-UefiDatabaseSignatures {
     }
 }
 
+function Get-UEFICert {
+    param (
+        [Parameter(Mandatory)]
+        [ValidateSet('PKDefault','KEKDefault','dbDefault','dbxDefault','PK','KEK','db','dbx')]
+        [string]$Variable
+    )
+
+    try {
+        $SignatureList = (Get-SecureBootUEFI $Variable | Get-UefiDatabaseSignatures).SignatureList
+    }
+    catch {
+        if ($_.Exception.Message -match '0xC0000100') {
+            return @()
+        }
+        else {
+            throw $_.Exception.Message
+        }
+    }
+
+    $Subject = $SignatureList.SignatureData.Subject
+
+    if ($Verbose -or $Variable -match 'PK') {
+        $Filter_Regex = '.*'
+    }
+    else {
+        $Filter_Regex = 'Microsoft|Mosby'
+    }
+
+    $Certs = $Subject | where { $_ -match $Filter_Regex } | foreach { $null = $_ -match $CN_Regex; $Matches[2] }
+
+    if ($Variable -match 'PK') {
+        if ($SignatureList.SignatureData -eq $null -and $SignatureList.SignatureOwner.Guid -eq $VMWARE_GUID) {
+            $Certs = @('VMware NULL PK')
+        }
+        elseif ($Subject -match 'VirtualBox') {
+            $Certs = @('VirtualBox UEFI PK')
+        }
+    }
+
+    return $Certs
+}
+
 function Get-SignatureDataSVN {
     param (
         [Parameter(Mandatory)]
@@ -550,13 +594,13 @@ function Compare-DBXSignatureData {
         return $null
     }
 
-    $Matched = 0
-    $Retired_Count = 0
+    $MatchingCount = 0
+    $RetiredCount = 0
     $MissingSigList = $null
 
     foreach ($RequiredSig in $RequiredSignatureData) {
         if ($DBXSignatureData -contains $RequiredSig) {
-            $Matched++
+            $MatchingCount++
 
             switch -Regex ($RequiredSig) {
                 "^$EFI_BOOTMGR_SVN_GUID"  { $SVN_SigCount++ }
@@ -573,7 +617,7 @@ function Compare-DBXSignatureData {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                     else {
                         $MissingSigList += "{0}Missing [{1}] bootmgfw.efi SVN {2}`n" -f $Tab4, $RequiredSig, (Get-SignatureDataSVN $RequiredSig)
@@ -584,7 +628,7 @@ function Compare-DBXSignatureData {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                     else {
                         $MissingSigList += "{0}Missing [{1}] cdboot.efi SVN {2}`n" -f $Tab4, $RequiredSig, (Get-SignatureDataSVN $RequiredSig)
@@ -595,7 +639,7 @@ function Compare-DBXSignatureData {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
 
                     if ($CurrentSVN -ge $RequiredSVN) {
-                        $Matched++
+                        $MatchingCount++
                     }
                     else {
                         $MissingSigList += "{0}Missing [{1}] wdsmgfw.efi SVN {2}`n" -f $Tab4, $RequiredSig, (Get-SignatureDataSVN $RequiredSig)
@@ -607,11 +651,14 @@ function Compare-DBXSignatureData {
                         $MissingSig = $JSON.images.$Arch | where { $_.authenticodeHash -eq $RequiredSig }
 
                         if ($MissingSig -ne $null) {
-                            if ($MissingSig.filename -eq '') {
-                                $MissingSig.filename = '(none)'
+                            if ($MissingSig.filename -ne '') {
+                                $MissingSig.filename = '"{0}"' -f $MissingSig.filename.TrimEnd()
+                            }
+                            else {
+                                $MissingSig.filename = 'No filename'
                             }
 
-                            $Columns = ('{0} {1} {2}' -f $MissingSig.filename, $MissingSig.companyName, $MissingSig.dateOfAddition) -replace '  '
+                            $Columns = ('{0}, {1} {2}' -f $MissingSig.filename, $MissingSig.companyName, $MissingSig.dateOfAddition) -replace '  '
                             $MissingSigList += "{0}Missing [{1}] {2}`n" -f $Tab4, $MissingSig.authenticodeHash, $Columns
                         }
                         else {
@@ -620,7 +667,7 @@ function Compare-DBXSignatureData {
                     }
 
                     if ($EFI_CERT_SHA256_GUID_RETIRED -contains $RequiredSig) {
-                        $Retired_Count++
+                        $RetiredCount++
                     }
                 }
             }
@@ -637,45 +684,46 @@ function Compare-DBXSignatureData {
         $SigType = 'SVN'
     }
 
-    if ($Matched -eq $RequiredCount) {
-        $Result = 'SUCCESS: Matched {0}/{1} {2} signatures from {3}' -f $Matched, $RequiredCount, $SigType, $Filename
+    if ($MatchingCount -eq $RequiredCount) {
+        $Result = 'SUCCESS: Matched {0}/{1} {2} signatures from {3}' -f $MatchingCount, $RequiredCount, $SigType, $Filename
         Write-Host $Result -ForegroundColor Green
 
         if ($Log) {
             $Result | Add-Content $LogFile
         }
+
+        return
     }
-    else {
-        $Missing = $RequiredCount - $Matched
 
-        if ($Retired_Count) {
-            $Result1 = 'FAILED: Missing {0}/{1} {2} signatures from {3}' -f $Missing, $RequiredCount, $SigType, $Filename
-            Write-Host $Result1 -ForegroundColor Red
+    $MissingCount = $RequiredCount - $MatchingCount
 
-            $Active_Count = $Missing - $Retired_Count
+    if ($RetiredCount -and ('Microsoft Windows Production PCA 2011' -in (Get-UEFICert dbx))) {
+        $Result1 = 'FAILED: Missing {0}/{1} {2} signatures from {3}' -f $MissingCount, $RequiredCount, $SigType, $Filename
+        Write-Host $Result1 -ForegroundColor Red
 
-            if ($Active_Count) {
-                $Result2 = '{0}Microsoft retired {1}/{2} of missing signatures (April 2026). {3} signatures are still required' -f $Tab4, $Retired_Count, $Missing, $Active_Count
-            }
-            else {
-                $Result2 = '{0}Microsoft retired all of the missing {1} signatures (April 2026)' -f $Tab4, $Retired_Count
-            }
+        $ActiveCount = $MissingCount - $RetiredCount
 
-            Write-Host $Result2 -ForegroundColor Yellow
-            $Result = "{0}`n{1}" -f $Result1, $Result2
+        if ($ActiveCount) {
+            $Result2 = "{0}Microsoft retired {1}/{2} of missing signatures (April 2026), which are superseded by the PCA 2011 revocation.`n{3}{4} other signatures are still required" -f $Tab4, $RetiredCount, $MissingCount, $Tab4, $ActiveCount
         }
         else {
-            $Result = 'FAILED: Missing {0}/{1} {2} signatures from {3}' -f $Missing, $RequiredCount, $SigType, $Filename
-            Write-Host $Result -ForegroundColor Red
+            $Result2 = '{0}Microsoft retired all {1} missing signatures (April 2026), which are superseded by the PCA 2011 revocation.' -f $Tab4, $RetiredCount
         }
 
-        if ($Verbose) {
-            $MissingSigList -replace "`n$"
-        }
+        Write-Host $Result2 -ForegroundColor Yellow
+        $Result = "{0}`n{1}" -f $Result1, $Result2
+    }
+    else {
+        $Result = 'FAILED: Missing {0}/{1} {2} signatures from {3}' -f $MissingCount, $RequiredCount, $SigType, $Filename
+        Write-Host $Result -ForegroundColor Red
+    }
 
-        if ($Log) {
-            @($Result; if ($Verbose) { $MissingSigList }) | Add-Content $LogFile
-        }
+    if ($Verbose) {
+        $MissingSigList -replace "`n$"
+    }
+
+    if ($Log) {
+        @($Result; if ($Verbose) { $MissingSigList }) | Add-Content $LogFile
     }
 }
 

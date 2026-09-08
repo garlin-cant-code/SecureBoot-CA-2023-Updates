@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.04
+.VERSION 2026.09.08
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -84,7 +84,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.09.04'
+$ScriptVersion = '2026.09.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -112,8 +112,8 @@ $7z_dll = "$TEMP_DIR\7z.dll"
 $offlinereg_URL = 'http://erwan.labalec.fr/offlinereg/offlinereg.zip'
 $offlinereg_BACKUP_URL = 'https://web.archive.org/web/20230331060312if_/http://erwan.labalec.fr/offlinereg/offlinereg.zip'
 
-$offlinereg = "$env:TEMP\offlinereg-win32.exe"
-$offlinereg_dll = "$env:TEMP\offreg.dll"
+$offlinereg = "$TEMP_DIR\offlinereg-win32.exe"
+$offlinereg_dll = "$TEMP_DIR\offreg.dll"
 
 $WIM_Formats = @('wim','esd','swm')
 
@@ -174,10 +174,10 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Install-Tools {
     $objShell = New-Object -ComObject 'Shell.Application'
-    $objFolder = $objShell.NameSpace($env:TEMP)
+    $objFolder = $objShell.NameSpace($TEMP_DIR)
 
     if (-not (Test-Path $wimlib_imagex -PathType Leaf) -or -not (Test-Path $wimlib_dll -PathType Leaf)) {
-        $ZIP_File = '{0}\{1}' -f $env:TEMP, ($wimlib_URL -split '/')[-1]
+        $ZIP_File = '{0}\{1}' -f $TEMP_DIR, ($wimlib_URL -split '/')[-1]
 
         try {
             $Response = Invoke-WebRequest -UseBasicParsing -Uri $wimlib_URL -OutFile $ZIP_File -PassThru -TimeoutSec 5 -ErrorAction Stop
@@ -218,7 +218,7 @@ function Install-Tools {
     }
 
     if (-not (Test-Path $offlinereg -PathType Leaf) -or -not (Test-Path $offlinereg_dll -PathType Leaf)) {
-        $ZIP_File = '{0}\{1}' -f $env:TEMP, ($offlinereg_URL -split '/')[-1]
+        $ZIP_File = '{0}\{1}' -f $TEMP_DIR, ($offlinereg_URL -split '/')[-1]
 
         try {
             $Response = Invoke-WebRequest -UseBasicParsing -Uri $offlinereg_URL -OutFile $ZIP_File -PassThru -TimeoutSec 5 -ErrorAction Stop
@@ -550,7 +550,7 @@ function Get-UefiDatabaseSignatures {
 function Get-UEFICert {
     param (
         [Parameter(Mandatory)]
-        [ValidateSet('KEK','db','dbx')]
+        [ValidateSet('PKDefault','KEKDefault','dbDefault','dbxDefault','PK','KEK','db','dbx')]
         [string]$Variable
     )
 
@@ -1850,7 +1850,7 @@ function Check-WIM_File {
         Start-Process $7z_exe -ArgumentList "e $($WinSxS_Winner.WIM_File) -aoa $($WinSxS_Winner.Component_File) -o`"$TEMP_DIR`"" @Quiet_Params
     }
     else {
-        $ArgumentList = "extract `"$WIM_File`" $Index $Extract_Files --quiet --nullglob --no-acls --dest-dir=`"$env:TEMP`""
+        $ArgumentList = "extract `"$WIM_File`" $Index $Extract_Files --quiet --nullglob --no-acls --dest-dir=`"$TEMP_DIR`""
 
         try {
             Start-Process $wimlib_imagex -ArgumentList $ArgumentList @Quiet_Params
@@ -1870,7 +1870,7 @@ function Check-WIM_File {
         }
     }
 
-    $Hive = "$env:TEMP\SOFTWARE"
+    $Hive = "$TEMP_DIR\SOFTWARE"
     $CurrentVersion = & $offlinereg $Hive 'Microsoft\Windows NT\CurrentVersion' enumallvalues
 
     $Build = [int](($CurrentVersion | Select-String '"CurrentBuild"') -split '"')[3]
@@ -1891,8 +1891,8 @@ function Check-WIM_File {
          default  { $ProductName = 'W{0} {1}' -f $(if ($Build -lt 22000) { '10' } else { '11' }), $DisplayVersion }
     }
 
-    $Temp_BootMgrEX_File = "$env:TEMP\bootmgfw_EX.efi"
-    $Temp_BootMgr_File = "$env:TEMP\bootmgfw.efi"
+    $Temp_BootMgrEX_File = "$TEMP_DIR\bootmgfw_EX.efi"
+    $Temp_BootMgr_File = "$TEMP_DIR\bootmgfw.efi"
 
     if ($ShowPath) {
         $Filename = $WIM_File
@@ -1933,7 +1933,7 @@ function Check-WIM_File {
         'ERROR: No boot manager found in WIM.'
     }
 
-    $WinloadEFI_File = "$env:TEMP\winload.efi"
+    $WinloadEFI_File = "$TEMP_DIR\winload.efi"
 
     if (Test-Path $WinloadEFI_File) {
         $FileVersion = Get-FileVersion $WinloadEFI_File
@@ -2354,7 +2354,7 @@ $ScriptBlock = {
 
         if ($Partition.GUID -eq $null) {
             $VolumePath = Get-HarddiskVolume (Get-Partition -DriveLetter $Volume.DriveLetter).Guid
-            $WIM_Filename = "$env:TEMP\Winre.wim"
+            $WIM_Filename = "$TEMP_DIR\Winre.wim"
 
             try {
                 $null = New-Item -ItemType HardLink -Path $WIM_Filename -Target ('{0}:\Windows\System32\Recovery\Winre.wim' -f $Volume.DriveLetter) -Force
