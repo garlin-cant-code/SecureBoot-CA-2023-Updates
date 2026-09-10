@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.09.08
+$VERSION 2026.09.10
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.09.08'
+$ScriptVersion = '2026.09.10'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -504,7 +504,7 @@ function Get-SignatureDataSVN {
     )
 
     # https://github.com/microsoft/secureboot_objects/blob/main/scripts/utility_functions.py
-    $SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
+    [version]$SVN = '{0}.{1}' -f [System.Convert]::ToUInt16($SignatureData.Substring(40,2) + $SignatureData.Substring(38,2), 16), [System.Convert]::ToUInt16($SignatureData.Substring(36,2) + $SignatureData.Substring(34,2), 16)
 
     return $SVN
 }
@@ -527,10 +527,10 @@ function Get-SecureBootUEFI_SVN {
         }
     }
 
-    $LatestSVN = $SignatureData -match "^$SVN" | foreach { [version](Get-SignatureDataSVN $_) } | sort | select -Last 1
+    $LatestSVN = $SignatureData -match "^$SVN" | foreach { (Get-SignatureDataSVN $_) } | sort | select -Last 1
 
     if ($LatestSVN.Count) {
-        $SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
+        [version]$SVN = '{0}.{1}' -f $LatestSVN.Major, $LatestSVN.Minor
     }
     else {
         $SVN = $null
@@ -620,7 +620,7 @@ function Compare-DBXSignatureData {
                         $MatchingCount++
                     }
                     else {
-                        $MissingSigList += "{0}Missing [{1}] bootmgfw.efi SVN {2}`n" -f $Tab4, $RequiredSig, (Get-SignatureDataSVN $RequiredSig)
+                        $MissingSigList += "{0}Missing [{1}] bootmgfw.efi SVN {2}`n" -f $Tab4, $RequiredSig, $RequiredSVN
                     }
                 }
 
@@ -631,7 +631,7 @@ function Compare-DBXSignatureData {
                         $MatchingCount++
                     }
                     else {
-                        $MissingSigList += "{0}Missing [{1}] cdboot.efi SVN {2}`n" -f $Tab4, $RequiredSig, (Get-SignatureDataSVN $RequiredSig)
+                        $MissingSigList += "{0}Missing [{1}] cdboot.efi SVN {2}`n" -f $Tab4, $RequiredSig, $RequiredSVN
                     }
                 }
 
@@ -642,7 +642,7 @@ function Compare-DBXSignatureData {
                         $MatchingCount++
                     }
                     else {
-                        $MissingSigList += "{0}Missing [{1}] wdsmgfw.efi SVN {2}`n" -f $Tab4, $RequiredSig, (Get-SignatureDataSVN $RequiredSig)
+                        $MissingSigList += "{0}Missing [{1}] wdsmgfw.efi SVN {2}`n" -f $Tab4, $RequiredSig, $RequiredSVN
                     }
                 }
 
