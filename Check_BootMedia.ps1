@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.08
+.VERSION 2026.09.10
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -84,7 +84,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.09.08'
+$ScriptVersion = '2026.09.10'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -248,18 +248,18 @@ function Install-Tools {
 function Confirm-MinimumUBR {
     $Release_List = ConvertFrom-Csv @'
         Build, MininumUBR, Release, KB
-        14393, 9234, Server 2016, KB5094122 (Jun 2026)
-        17763, 8880, Server 2019, KB5094123 (Jun 2026)
-        19044, 7417, W10 21H2,    KB5094127 (Jun 2026)
-        19045, 7417, W10 22H2,    KB5094127 (Jun 2026)
-        20348, 5256, Server 2022, KB5094128 (Jun 2026)
-        22000, 3260, W11 21H2,    KB5044280 (Oct 2025)
+        14393, 9512, Server 2016, KB5123099 (Sep 2026)
+        17763, 9245, Server 2019, KB5122876 (Sep 2026)
+        19044, 7725, W10 21H2,    KB5122878 (Sep 2026)
+        19045, 7725, W10 22H2,    KB5122878 (Sep 2026)
+        20348, 5622, Server 2022, KB5122882 (Sep 2026)
+        22000, 3260, W11 21H2,    KB5044280 (Oct 2024)
         22621, 6060, W11 22H2,    KB5066793 (Oct 2025)
-        22631, 7219, W11 23H2,    KB5093998 (Jun 2026)
+        22631, 7582, W11 23H2,    KB5122880 (Sep 2026)
         25398, 2274, Server 23H2, KB5082060 (Apr 2026)
-        26100, 8655, W11 24H2,    KB5094126 (Jun 2026)
-        26200, 8655, W11 25H2,    KB5094126 (Jun 2026)
-        28000, 2269, W11 26H1,    KB5095051 (Jun 2026)
+        26100, 9445, W11 24H2,    KB5124008 (Sep 2026)
+        26200, 9445, W11 25H2,    KB5124008 (Sep 2026)
+        28000, 2954, W11 26H1,    KB5124012 (Sep 2026)
 '@
 
     $Match = @($Release_List | where { $_.Build -eq $Build })

@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.08
+.VERSION 2026.09.10
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -99,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.09.08'
+$ScriptVersion = '2026.09.10'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -178,18 +178,18 @@ $TEMP_DIR = "$env:TEMP"
 function Confirm-MinimumUBR {
     $Release_List = ConvertFrom-Csv @'
         Build, MininumUBR, Release, KB
-        14393, 9234, Server 2016, KB5094122 (Jun 2026)
-        17763, 8880, Server 2019, KB5094123 (Jun 2026)
-        19044, 7417, W10 21H2,    KB5094127 (Jun 2026)
-        19045, 7417, W10 22H2,    KB5094127 (Jun 2026)
-        20348, 5256, Server 2022, KB5094128 (Jun 2026)
-        22000, 3260, W11 21H2,    KB5044280 (Oct 2025)
+        14393, 9512, Server 2016, KB5123099 (Sep 2026)
+        17763, 9245, Server 2019, KB5122876 (Sep 2026)
+        19044, 7725, W10 21H2,    KB5122878 (Sep 2026)
+        19045, 7725, W10 22H2,    KB5122878 (Sep 2026)
+        20348, 5622, Server 2022, KB5122882 (Sep 2026)
+        22000, 3260, W11 21H2,    KB5044280 (Oct 2024)
         22621, 6060, W11 22H2,    KB5066793 (Oct 2025)
-        22631, 7219, W11 23H2,    KB5093998 (Jun 2026)
+        22631, 7582, W11 23H2,    KB5122880 (Sep 2026)
         25398, 2274, Server 23H2, KB5082060 (Apr 2026)
-        26100, 8655, W11 24H2,    KB5094126 (Jun 2026)
-        26200, 8655, W11 25H2,    KB5094126 (Jun 2026)
-        28000, 2269, W11 26H1,    KB5095051 (Jun 2026)
+        26100, 9445, W11 24H2,    KB5124008 (Sep 2026)
+        26200, 9445, W11 25H2,    KB5124008 (Sep 2026)
+        28000, 2954, W11 26H1,    KB5124012 (Sep 2026)
 '@
 
     $Match = @($Release_List | where { $_.Build -eq $Build })
@@ -735,10 +735,11 @@ function Match-DBXSignatureData {
             $MatchingCount++
         }
         else {
+            $RequiredSVN = Get-SignatureDataSVN $RequiredSig
+
             switch -Regex ($RequiredSig) {
                 "^$EFI_BOOTMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
-                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $MatchingCount++
@@ -747,7 +748,6 @@ function Match-DBXSignatureData {
 
                 "^$EFI_CDBOOT_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_CDBOOT_SVN_GUID
-                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $MatchingCount++
@@ -756,7 +756,6 @@ function Match-DBXSignatureData {
 
                 "^$EFI_WDSMGR_SVN_GUID" {
                     $CurrentSVN = Get-SecureBootUEFI_SVN $EFI_WDSMGR_SVN_GUID
-                    $RequiredSVN = Get-SignatureDataSVN $RequiredSig
 
                     if ($CurrentSVN -ge $RequiredSVN) {
                         $MatchingCount++
@@ -872,7 +871,7 @@ function Audit-UEFI {
         $CheckList += "{0,-3} Windows BootMgr SVN is missing from UEFI DBX (DBXUpdateSVN.bin)`n" -f ('{0}.' -f $index++)
     }
     elseif ((Get-DBXUpdateSVN) -gt $UEFI_SVN) {
-        $CheckList += "{0,-3} SecureBootUpdates SVN is higher than UEFI DBX`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} DBXUpdateSVN.bin ({1}) is higher than UEFI SVN`n" -f ('{0}.' -f $index++), (Get-DBXUpdateSVN)
     }
 
     $BootMgrEX_File_Hash = (Get-FileHash $BootMgrEX_File).Hash
@@ -891,7 +890,7 @@ function Audit-UEFI {
             $EFI_SkuSiPolicyFile_Version = Get-SkuSiPolicyVersion $EFI_SkuSiPolicy_File
 
             if (($EFI_SkuSiPolicyFile_Hash -ne $SkuSiPolicyFile_Hash) -and ([Version]$SkuSiPolicyFile_Version -gt [Version]$EFI_SkuSiPolicyFile_Version)) {
-                $CheckList += "{0,-3} SkuSiPolicy.p7b is not updated`n" -f ('{0}.' -f $index++)
+                $CheckList += "{0,-3} SkuSiPolicy.p7b ({1}) is not updated`n" -f ('{0}.' -f $index++), $SkuSiPolicyFile_Version
                 $script:UpdateSkuSiPolicy = $true
             }
         }
@@ -1219,18 +1218,10 @@ function Update-EFI_BootManager {
             exit 1
         }
 
-        $BCD = "$EFI_DriveLetter\EFI\Microsoft\Boot\BCD"
-        $Backup_BCD = "$TEMP_DIR\BCD.BAK"
-
         try {
             Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /s" -NoNewWindow -Wait
-
-            Copy-Item $BCD $Backup_BCD -Force
             Start-Process $bcdboot -ArgumentList "$env:SystemRoot /s $EFI_DriveLetter /f UEFI /bootex /l $SystemLocale" -NoNewWindow -Wait
-            Copy-Item $Backup_BCD $BCD -Force
-
             Start-Process 'mountvol' -ArgumentList "$EFI_DriveLetter /d" -NoNewWindow -Wait
-            Remove-Item $Backup_BCD -Force
         }
         catch {
             $_.Exception.Message
