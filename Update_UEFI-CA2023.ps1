@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.10
+.VERSION 2026.09.30
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -99,7 +99,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.09.10'
+$ScriptVersion = '2026.09.30'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -120,7 +120,7 @@ switch ($Arch) {
     'arm64' { $EDK2_Arch = 'aarch64' }
 }
 
-$EDK2_Version = 'v1.6.5'
+$EDK2_Version = 'v1.7.0'
 $EDK2_bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/$EDK2_Version/edk2-${EDK2_Arch}-secureboot-binaries.zip"
 
 $PK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/PK/Certificate/WindowsOEMDevicesPK.der'
@@ -178,18 +178,19 @@ $TEMP_DIR = "$env:TEMP"
 function Confirm-MinimumUBR {
     $Release_List = ConvertFrom-Csv @'
         Build, MininumUBR, Release, KB
-        14393, 9512, Server 2016, KB5123099 (Sep 2026)
-        17763, 9245, Server 2019, KB5122876 (Sep 2026)
-        19044, 7725, W10 21H2,    KB5122878 (Sep 2026)
-        19045, 7725, W10 22H2,    KB5122878 (Sep 2026)
-        20348, 5622, Server 2022, KB5122882 (Sep 2026)
-        22000, 3260, W11 21H2,    KB5044280 (Oct 2024)
-        22621, 6060, W11 22H2,    KB5066793 (Oct 2025)
-        22631, 7582, W11 23H2,    KB5122880 (Sep 2026)
-        25398, 2274, Server 23H2, KB5082060 (Apr 2026)
-        26100, 9445, W11 24H2,    KB5124008 (Sep 2026)
-        26200, 9445, W11 25H2,    KB5124008 (Sep 2026)
-        28000, 2954, W11 26H1,    KB5124012 (Sep 2026)
+        14393, 9512,  Server 2016, KB5123099 (Sep 2026)
+        17763, 9245,  Server 2019, KB5122876 (Sep 2026)
+        19044, 7725,  W10 21H2,    KB5122878 (Sep 2026)
+        19045, 7725,  W10 22H2,    KB5122878 (Sep 2026)
+        20348, 5622,  Server 2022, KB5122882 (Sep 2026)
+        22000, 3260,  W11 21H2,    KB5044280 (Oct 2024)
+        22621, 6060,  W11 22H2,    KB5066793 (Oct 2025)
+        22631, 7582,  W11 23H2,    KB5122880 (Sep 2026)
+        25398, 2274,  Server 23H2, KB5082060 (Apr 2026)
+        26100, 9445,  W11 24H2,    KB5124008 (Sep 2026)
+        26200, 9445,  W11 25H2,    KB5124008 (Sep 2026)
+        26300, 9457,  W11 26H2,    GA (Sep 2026)
+        28000, 2954,  W11 26H1,    KB5124012 (Sep 2026)
 '@
 
     $Match = @($Release_List | where { $_.Build -eq $Build })
@@ -203,7 +204,7 @@ function Confirm-MinimumUBR {
         }
     }
     else {
-        if ($Build -gt 26200) {
+        if ($Build -gt 26300) {
             return "Cannot confirm if $ProductName (${Build}.$UBR) has the latest files"
         }
         else {
@@ -775,7 +776,7 @@ function Match-DBXSignatureData {
 
 function Get-SbatLevel {
     try {
-        $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction Stop)
+        $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel')
     }
     catch {
         $SbatLevel_Bytes = $null
@@ -1456,10 +1457,26 @@ $ScriptBlock = {
     $Model = '{0} {1}' -f ($System.Manufacturer -split ',')[0], $System.Model
 
     if ($KEK_Certs -notcontains 'Microsoft Corporation KEK 2K CA 2023' -and $dbx_Certs -notcontains 'Microsoft Windows Production PCA 2011') {
+        # https://support.hp.com/ie-en/document/ish_13070353-13070429-16
+        # https://kaas.hpcloud.hp.com/PROD/v2/renderbinary/15247392/14953397/p-sik-5107-ea-gbj/eosl-products-package-v5
+
+        if ($BIOS_Version -match '^HP(?!\S)|Hewlett' -and $BIOS_Version -notmatch 'SBKPFV3') {
+            if ($BIOS_Version -match 'SBKPF' -and $System.OEMStringArray -match 'EDK2_1' -and ($PK_Cert -eq 'HP UEFI Secure Boot 2013 PK Key' -or $PK_Cert -eq 'HP UEFI Secure Boot PK 2017')) {
+                $HP_EOSL = $true
+            }
+            else {
+                $HP_EOSL = $false
+            }
+        }
+
         switch -Regex ($Model) {
-            'EliteBook 850 G5' { $Unsafe_Model = $true }
-            'LENOVO ThinkCentre M700' { $Unsafe_Model = $true }
-            'SAMSUNG ELECTRONICS CO. 300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
+            '300E4C/300E5C/300E7C' { $Unsafe_Model = $true }
+            'HP ENVY 15'       { $Unsafe_Model = $true }
+            'Inspiron 5459'    { $Unsafe_Model = $true }
+            'Inspiron 5559'    { $Unsafe_Model = $true }
+            'Inspiron 5759'    { $Unsafe_Model = $true }
+            'ThinkCentre M700' { $Unsafe_Model = $true }
+            'Z370P D3'         { $Unsafe_Model = $true }
 
             default {
                 try {
@@ -1472,6 +1489,18 @@ $ScriptBlock = {
                     $Unsafe_Model = $true
                 }
             }
+        }
+    }
+
+    if ($HP_EOSL -ne $null) {
+        if ($HP_EOSL) {
+            "This version of HP BIOS requires a specific update script.`n"
+            "Download 'EOSL_Products_Package_V5.zip' from:`nhttps://kaas.hpcloud.hp.com/PROD/v2/renderbinary/15247392/14953397/p-sik-5107-ea-gbj/eosl-products-package-v5`n"
+            exit 0
+        }
+        else {
+            Write-Host "WARNING: $Model may be corrupted by updating Secure Boot certs.`n" -ForegroundColor Red
+            exit 1
         }
     }
 
@@ -1732,7 +1761,7 @@ $ScriptBlock = {
 
     if ($SkuSiPolicy -or (Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
         try {
-            $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity' -ErrorAction Stop
+            $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity'
 
             if ($CodeIntegrity -eq 1) {
                 $UEFI_Lock = $true
@@ -1774,12 +1803,24 @@ $ScriptBlock = {
         }
     }
 
-    if ($SecureBoot -and -not (Get-SbatLevel)) {
-        if ($Latest) { Write-Output '' }
-        'Applying SBAT update for Linux.'
+    if ($SecureBoot -and (-not (Get-SbatLevel))) {
+        try {
+            $SbatOptOut = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'OptOut'
+        }
+        catch {
+        }
 
-        $AvailableUpdates = $AvailableUpdates -bor 0x400
-        $Task_Updated = $true
+        if ($Latest) { Write-Output '' }
+
+        if (-not $SbatOptOut) {
+            'Applying SBAT update for Linux.'
+
+            $AvailableUpdates = $AvailableUpdates -bor 0x400
+            $Task_Updated = $true
+        }
+        else {
+            'Skipping SBAT update for Linux.'
+        }
     }
 
     if ($AvailableUpdates -gt 0) {
