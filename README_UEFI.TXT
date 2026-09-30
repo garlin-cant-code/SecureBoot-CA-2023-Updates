@@ -83,3 +83,24 @@ this BIOS version.
 
 Use the "Delete All Keys" option in the UEFI menu, before running the 'Update_UEFI-CA2023.ps1' script.
 
+
+PARTIAL LIST OF PC's WITH KNOWN PROBLEMS
+========================================
+
+HP has a special update script for commercial PC's:
+
+HP EliteBook 830 G5
+HP EliteBook 836 G5
+HP EliteBook 840 G5
+HP EliteBook 846 G5
+HP EliteBook 850 G5
+
+
+Do not attempt to update these PC models's, they have been identified with BIOS or Secure Boot issues after
+attempted updates.
+
+Dell Inspiron 5459
+Dell Inspiron 5559
+Dell Inspiron 5759
+Lenovo ThinkCentre M700
+Samsung 300E4C/300E5C/300E7C
