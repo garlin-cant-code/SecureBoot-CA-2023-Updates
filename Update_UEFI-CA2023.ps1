@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.30
+.VERSION 2026.10.08
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -40,11 +40,18 @@
     A BIOS could be corrupted or damaged in certain cases by proceeding.  Not recommended for general use.
 
 .PARAMETER Revoke
-    Revoke [Microsoft Windows Production PCA 2011] certificate by adding the cert to the UEFI DBX.
+    Perform revocation by adding the [Production PCA 2011] certificate, and list of EFI signatures from dbxupdate.bin to the UEFI's DBX variable.
     To allow dual-booting of [Production PCA 2011] & [UEFI CA 2023] media, do not use the -Revoke option.
 
+    This option is mutually exclusive with -RevokeNoDBX
+
+.PARAMETER RevokeNoDBX
+    Perform revocation by adding the [Production PCA 2011] certificate, but without any EFI signatures from dbxupdate.bin.
+
+    This option is mutually exclusive with -Revoke
+
 .PARAMETER Latest
-    Download latest version of dbxupdate.bin and DBXUpdateSVN.bin, from Microsoft's Secure Boot Objects GitHub before proceeding.
+    Download latest version of dbxupdate.bin & DBXUpdateSVN.bin, from Microsoft's Secure Boot Objects GitHub before proceeding.
 
 .PARAMETER SkuSiPolicy
     Deploy \Windows\System32\SecureBootUpdates\SkuSiPolicy.p7b to EFI partition.
@@ -63,6 +70,8 @@
     Update_UEFI-CA2023.ps1 -Revoke
 .EXAMPLE
     Update_UEFI-CA2023.ps1 -Revoke -Latest -Log
+.EXAMPLE
+    Update_UEFI-CA2023.ps1 -RevokeNoDBX
 #>
 
 [CmdletBinding(DefaultParameterSetName='Default')]
@@ -80,8 +89,11 @@ param (
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Force,
 
-    [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
     [switch]$Revoke,
+
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
+    [switch]$RevokeNoDBX,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
     [switch]$Latest,
@@ -99,7 +111,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.09.30'
+$ScriptVersion = '2026.10.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -173,7 +185,7 @@ $SystemLocale = (Get-WinSystemLocale).Name
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
-$TEMP_DIR = "$env:TEMP"
+$TEMP_DIR = $env:TEMP
 
 function Confirm-MinimumUBR {
     $Release_List = ConvertFrom-Csv @'
@@ -819,6 +831,10 @@ function Audit-UEFI {
     $CheckList = $null
     $index = 1
 
+    if (-not $SetupMode -and -not (Confirm-SecureBootUEFI)) {
+        $CheckList += "{0,-3} Secure Boot is DISABLED`n" -f ('{0}.' -f $index++)
+    }
+
     if ($SetupMode) {
         $CheckList += "{0,-3} UEFI is in Setup Mode`n" -f ('{0}.' -f $index++)
 
@@ -827,15 +843,8 @@ function Audit-UEFI {
         }
     }
 
-    try {
-        $script:SecureBoot_TaskState = (Get-ScheduledTask -TaskName 'Secure-Boot-Update' -ErrorAction Stop).State
-    }
-    catch {
-        $script:SecureBoot_TaskState = 'Removed'
-    }
-
-    if ($SecureBoot_TaskState -ne 'Ready') {
-        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
+    if ($SecureBoot_TaskState -notmatch 'Ready|Running') {
+        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is {1}`n" -f ('{0}.' -f $index++), $SecureBoot_TaskState.ToString().ToUpper()
     }
 
     if ($PK_Untrusted) {
@@ -863,7 +872,7 @@ function Audit-UEFI {
     }
 
     if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$UpdatesFolder\dbxupdate.bin")) {
-        $CheckList += "{0,-3} DBX Updates are missing from UEFI DBX (dbxupdate.bin)`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} EFI signatures are missing from UEFI DBX (dbxupdate.bin)`n" -f ('{0}.' -f $index++)
     }
 
     $global:UEFI_SVN = Get-SecureBootUEFI_SVN $EFI_BOOTMGR_SVN_GUID
@@ -1615,6 +1624,13 @@ $ScriptBlock = {
     $PFXCert = Get-PFXCert $BootMgr_File
     $BootMgrSVN = Get-BootManagerSVN $BootMgr_File
 
+    try {
+        $SecureBoot_TaskState = (Get-ScheduledTask -TaskName 'Secure-Boot-Update' -ErrorAction Stop).State
+    }
+    catch {
+        $SecureBoot_TaskState = 'Removed'
+    }
+
     $CheckList = Audit-UEFI
 
     if ($Audit) {
@@ -1685,23 +1701,63 @@ $ScriptBlock = {
         Append-SecureBootSignedFile -Variable db -Filename "$UpdatesFolder\DBUpdateOROM2023.bin"
     }
 
-    if ($Revoke -or ('Microsoft Windows Production PCA 2011' -in $dbx_Certs)) {
+    if ($Revoke -or $RevokeNoDBX) {
         if ($SecureBoot -and ('Microsoft Corporation KEK 2K CA 2023' -notin $KEK_Certs)) {
             'WARNING: Disable Secure Boot, before attempting to use -Revoke option.  No [KEK 2K CA 2023] cert is currently enrolled.'
             '{0}System will fail to boot due to a security violation.' -f $Tab4
             exit 1
         }
 
-        if ($Latest) {
-            $Filename = ($DBXUpdate_SignedByKEK2023_URL -split '/')[-1]
+        if ($Revoke) {
+            if ($Latest) {
+                $Filename = ($DBXUpdate_SignedByKEK2023_URL -split '/')[-1]
+                $DBXUpdate_bin = "$TEMP_DIR\$Filename"
 
-            $DBXUpdate_bin = "$TEMP_DIR\$Filename"
+                try {
+                    'Downloading "{0}" from GitHub.' -f $Filename
+                    Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_SignedByKEK2023_URL -OutFile $DBXUpdate_bin
+                }
+                catch {
+                    $_.Exception.Message
+                    exit 1
+                }
+            }
+            else {
+                $DBXUpdate_bin = "$UpdatesFolder\dbxupdate.bin"
+            }
+
+            try {
+                $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+            }
+            catch {
+                if ($_.Exception.Message -match '0xC0000100') {
+                    $DBXSignatureData = $false
+                }
+                else {
+                    throw $_.Exception.Message
+                }
+            }
+
+            if (-not $(Match-DBXSignatureData $DBXUpdate_bin)) {
+                Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
+            }
+            elseif ($Latest) {
+                '"{0}" is not a newer version.' -f (Split-Path $DBXUpdate_bin -Leaf)
+            }
+
+            if ($Latest) {
+                Remove-Item $DBXUpdate_bin -Force
+            }
+        }
+
+        if ('Microsoft Windows Production PCA 2011' -notin (Get-UEFICert dbx)) {
+            Append-SecureBootSignedFile -Variable dbx -Filename "$UpdatesFolder\DBXUpdate2024.bin"
+        }
+
+        if ($Latest) {
             $DBXUpdateSVN_bin = "$TEMP_DIR\DBXUpdateSVN.bin"
 
             try {
-                'Downloading "{0}" from GitHub.' -f $Filename
-                Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_SignedByKEK2023_URL -OutFile $DBXUpdate_bin
-
                 "Downloading `"DBXUpdateSVN.bin`" from GitHub.`n"
                 Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdateSVN_bin_URL -OutFile $DBXUpdateSVN_bin
             }
@@ -1711,31 +1767,7 @@ $ScriptBlock = {
             }
         }
         else {
-            $DBXUpdate_bin = "$UpdatesFolder\dbxupdate.bin"
             $DBXUpdateSVN_bin = "$UpdatesFolder\DBXUpdateSVN.bin"
-        }
-
-        try {
-            $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
-        }
-        catch {
-            if ($_.Exception.Message -match '0xC0000100') {
-                $DBXSignatureData = $false
-            }
-            else {
-                throw $_.Exception.Message
-            }
-        }
-
-        if (-not $(Match-DBXSignatureData $DBXUpdate_bin)) {
-            Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
-        }
-        elseif ($Latest) {
-            '"{0}" is not a newer version.' -f (Split-Path $DBXUpdate_bin -Leaf)
-        }
-
-        if ('Microsoft Windows Production PCA 2011' -notin (Get-UEFICert dbx)) {
-            Append-SecureBootSignedFile -Variable dbx -Filename "$UpdatesFolder\DBXUpdate2024.bin"
         }
 
         if ('Microsoft Windows Production PCA 2011' -in (Get-UEFICert dbx)) {
@@ -1752,7 +1784,6 @@ $ScriptBlock = {
         }
 
         if ($Latest) {
-            Remove-Item $DBXUpdate_bin -Force
             Remove-Item $DBXUpdateSVN_bin -Force
         }
     }
@@ -1824,20 +1855,27 @@ $ScriptBlock = {
     }
 
     if ($AvailableUpdates -gt 0) {
-        $null = Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name 'AvailableUpdates' -Value $AvailableUpdates
+        if ($SecureBoot_TaskState -match 'Disabled|Removed') {
+            'WARNING: "Secure-Boot-Update" scheduled task is {0}.  Unable to apply "AvailableUpdates" = 0x{1:x}' -f $SecureBoot_TaskState.ToUpper(), $AvailableUpdates
+            $Task_Updated = $false
+        }
+        else {
+            $null = Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot' -Name 'AvailableUpdates' -Value $AvailableUpdates
+            Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update'
+        }
+    }
 
-        switch ($SecureBoot_TaskState) {
-            'Disabled' {
-                'WARNING: "Secure-Boot-Update" scheduled task is DISABLED.  Unable to apply "AvailableUpdates" = 0x{0:x}' -f $AvailableUpdates
-                $Task_Updated = $false
+    if ($RevokeNoDBX) {
+        if ($SecureBoot_TaskState -notmatch 'Disabled|Removed') {
+            try {
+                $null = Disable-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update'
             }
-            'Removed' {
-                'WARNING: "Secure-Boot-Update" scheduled task was REMOVED.  Unable to apply "AvailableUpdates" = 0x{0:x}' -f $AvailableUpdates
-                $Task_Updated = $false
+            catch {
+                $_.Exception.Message
+                exit 1
             }
-            default {
-                Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update'
-            }
+
+            'Disabled "Secure-Boot-Update" task to block automatic updates.'
         }
     }
 
@@ -1848,6 +1886,11 @@ $ScriptBlock = {
         if (($PFXCert -notmatch 'Windows UEFI CA 2023') -or ($BootMgrSVN -lt $UEFI_SVN) -or ($BootMgrSVN -eq $UEFI_SVN -and $BootMgr_File_Hash -ne $BootMgrEX_File_Hash)) {
             Update-EFI_BootManager
             $UEFI_Updated = $true
+        }
+
+        if ($SecureBoot_TaskState -match 'Disabled|Removed') {
+            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'WindowsUEFICA2023Capable' -Value 2 -Type DWord -Force
+            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'UEFICA2023Status' -Value 'Updated' -Type String -Force
         }
 
         if ($BootMedia) {

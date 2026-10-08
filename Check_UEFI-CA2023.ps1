@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.30
+.VERSION 2026.10.08
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.09.30'
+$ScriptVersion = '2026.10.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -939,8 +939,8 @@ function Audit-UEFI {
         $CheckList += "{0,-3} Secure Boot is DISABLED`n" -f ('{0}.' -f $index++)
     }
 
-    if ($SecureBoot_TaskState) {
-        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is $SecureBoot_TaskState.`n" -f ('{0}.' -f $index++)
+    if ($SecureBoot_TaskState -match 'Disabled|Removed') {
+        $CheckList += "{0,-3} `"Secure-Boot-Update`" scheduled task is {1}`n" -f ('{0}.' -f $index++), $SecureBoot_TaskState.ToString().ToUpper()
     }
 
     if ($SetupMode) {
@@ -983,7 +983,7 @@ function Audit-UEFI {
     }
 
     if (($dbx_BytesCount -eq 0) -or -not (Match-DBXSignatureData "$UpdatesFolder\dbxupdate.bin")) {
-        $CheckList += "{0,-3} DBX Updates are missing from UEFI DBX`n" -f ('{0}.' -f $index++)
+        $CheckList += "{0,-3} EFI signatures are missing from UEFI DBX (dbxupdate.bin)`n" -f ('{0}.' -f $index++)
         $script:RevokeFlags = $script:RevokeFlags -bor 0x2
     }
 
@@ -1082,7 +1082,7 @@ function Run-FiniteStateMachine {
             $script:RevokeMessage = $script:UpdateMessage + ' and update DBX signatures'
         }
         else {
-            $script:RevokeMessage = 'To update DBXUpdate signatures'
+            $script:RevokeMessage = 'To update DBX EFI signatures'
         }
     }
     elseif ($SVN_Required) {
@@ -1097,7 +1097,7 @@ function Run-FiniteStateMachine {
     if (-not $PK_Untrusted -and (('Microsoft Corporation KEK 2K CA 2023' -in $KEK_Certs) -or $SignedKEK)) {
         $MergedFlags = $UpdateFlags -bor $RevokeFlags
 
-        if (-not $SecureBoot_TaskState) {
+        if ($SecureBoot_TaskState -notmatch 'Disabled|Removed') {
             if ($UpdateFlags -and $RevokeFlags) {
                 "`nOPTION 1:  DO NOTHING AND WAIT.  Windows will apply the UEFI updates (PC has supported BIOS)."
 
@@ -1193,20 +1193,16 @@ function Run-FiniteStateMachine {
 }
 
 $ScriptBlock = {
-    # Force a refresh of reg key 'WindowsUEFICA2023Capable'
     try {
-        Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update' -ErrorAction Stop
+        $SecureBoot_TaskState = (Get-ScheduledTask -TaskName 'Secure-Boot-Update' -ErrorAction Stop).State
     }
     catch {
-        switch -Regex ($_.Exception.MessageId) {
-            '0x80041326' { $SecureBoot_TaskState = 'DISABLED' }
-            '0x80070002' { $SecureBoot_TaskState = 'REMOVED' }
+        $SecureBoot_TaskState = 'Removed'
+    }
 
-            default {
-                $_.Exception.Message
-                exit 1
-            }
-        }
+    # Force a refresh of reg key 'WindowsUEFICA2023Capable'
+    if ($SecureBoot_TaskState -eq 'Ready') {
+        Start-ScheduledTask -TaskName '\Microsoft\Windows\PI\Secure-Boot-Update' -ErrorAction Stop
     }
 
     $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
@@ -1338,7 +1334,7 @@ $ScriptBlock = {
             if ($BIOS_Version -match 'SBKPF' -and $System.OEMStringArray -match 'EDK2_1' -and ($PK_Cert -eq 'HP UEFI Secure Boot 2013 PK Key' -or $PK_Cert -eq 'HP UEFI Secure Boot PK 2017')) {
                 $HP_EOSL = $true
             }
-            else { 
+            else {
                 $HP_EOSL = $false
             }
         }
