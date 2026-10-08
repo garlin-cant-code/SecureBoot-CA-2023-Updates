@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.09.30
+.VERSION 2026.10.08
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -84,7 +84,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.09.30'
+$ScriptVersion = '2026.10.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -95,7 +95,7 @@ $Tab4 = ' ' * 4
 $Tab8 = ' ' * 8
 $Tab12 = ' ' * 12
 
-$TEMP_DIR = "$env:TEMP"
+$TEMP_DIR = $env:TEMP
 
 $wimlib_URL = 'https://wimlib.net/downloads/wimlib-1.14.5-windows-x86_64-bin.zip'
 $wimlib_BACKUP_URL = 'https://web.archive.org/web/20260322074734if_/https://wimlib.net/downloads/wimlib-1.14.5-windows-x86_64-bin.zip'
