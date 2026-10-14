@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.10.08
+.VERSION 2026.10.14
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -111,7 +111,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.10.08'
+$ScriptVersion = '2026.10.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -190,19 +190,19 @@ $TEMP_DIR = $env:TEMP
 function Confirm-MinimumUBR {
     $Release_List = ConvertFrom-Csv @'
         Build, MininumUBR, Release, KB
-        14393, 9512,  Server 2016, KB5123099 (Sep 2026)
-        17763, 9245,  Server 2019, KB5122876 (Sep 2026)
-        19044, 7725,  W10 21H2,    KB5122878 (Sep 2026)
-        19045, 7725,  W10 22H2,    KB5122878 (Sep 2026)
-        20348, 5622,  Server 2022, KB5122882 (Sep 2026)
+        14393, 9612,  Server 2016, KB5126868 (Oct 2026)
+        17763, 9376,  Server 2019, KB5126651 (Oct 2026)
+        19044, 7807,  W10 21H2,    KB5126657 (Oct 2026)
+        19045, 7807,  W10 22H2,    KB5126657 (Oct 2026)
+        20348, 5761,  Server 2022, KB5126655 (Oct 2026)
         22000, 3260,  W11 21H2,    KB5044280 (Oct 2024)
         22621, 6060,  W11 22H2,    KB5066793 (Oct 2025)
-        22631, 7582,  W11 23H2,    KB5122880 (Sep 2026)
+        22631, 7652,  W11 23H2,    KB5126653 (Oct 2026)
         25398, 2274,  Server 23H2, KB5082060 (Apr 2026)
-        26100, 9445,  W11 24H2,    KB5124008 (Sep 2026)
-        26200, 9445,  W11 25H2,    KB5124008 (Sep 2026)
-        26300, 9457,  W11 26H2,    GA (Sep 2026)
-        28000, 2954,  W11 26H1,    KB5124012 (Sep 2026)
+        26100, 9711,  W11 24H2,    KB5127648 (Oct 2026)
+        26200, 9711,  W11 25H2,    KB5127648 (Oct 2026)
+        26300, 9711,  W11 26H2,    KB5127648 (Oct 2026)
+        28000, 3231,  W11 26H1,    KB5127646 (Oct 2026)
 '@
 
     $Match = @($Release_List | where { $_.Build -eq $Build })
@@ -788,7 +788,7 @@ function Match-DBXSignatureData {
 
 function Get-SbatLevel {
     try {
-        $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel')
+        $SbatLevel_Bytes = [byte[]](Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'SbatLevel' -ErrorAction Stop)
     }
     catch {
         $SbatLevel_Bytes = $null
@@ -1399,7 +1399,13 @@ function Update-USB_Drive {
 }
 
 $ScriptBlock = {
-    $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion'
+    try {
+        $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+    }
+    catch {
+        $_.Exception.Message
+        exit 1
+    }
 
     $Build = $CurrentVersion.CurrentBuildNumber
     $UBR = $CurrentVersion.UBR
@@ -1441,7 +1447,7 @@ $ScriptBlock = {
     $NGC_Credential_Provider = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{D6886603-9D2F-4EB2-B667-1971041FA96B}'
 
     try {
-        $LogonCreds_Count = ((Get-ChildItem -Path $NGC_Credential_Provider) | where { (Get-ItemProperty $_.PSPath).LogonCredsAvailable -eq 1 }).Count
+        $LogonCreds_Count = ((Get-ChildItem -Path $NGC_Credential_Provider) | where { (Get-ItemProperty $_.PSPath -ErrorAction Stop).LogonCredsAvailable -eq 1 }).Count
     }
     catch {
         $LogonCreds_Count = 0
@@ -1489,7 +1495,7 @@ $ScriptBlock = {
 
             default {
                 try {
-                    $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel'
+                    $ConfidenceLevel = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\Servicing' -Name 'ConfidenceLevel' -ErrorAction Stop
                 }
                 catch {
                 }
@@ -1792,7 +1798,7 @@ $ScriptBlock = {
 
     if ($SkuSiPolicy -or (Test-Path -LiteralPath $EFI_SkuSiPolicy_File)) {
         try {
-            $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity'
+            $CodeIntegrity = Get-ItemPropertyValue -Path 'HKLM:\Software\Policies\Microsoft\Windows\DeviceGuard' -Name 'HypervisorEnforcedCodeIntegrity' -ErrorAction Stop
 
             if ($CodeIntegrity -eq 1) {
                 $UEFI_Lock = $true
@@ -1836,7 +1842,7 @@ $ScriptBlock = {
 
     if ($SecureBoot -and (-not (Get-SbatLevel))) {
         try {
-            $SbatOptOut = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'OptOut'
+            $SbatOptOut = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\SBAT' -Name 'OptOut' -ErrorAction Stop
         }
         catch {
         }
@@ -1856,7 +1862,7 @@ $ScriptBlock = {
 
     if ($AvailableUpdates -gt 0) {
         if ($SecureBoot_TaskState -match 'Disabled|Removed') {
-            'WARNING: "Secure-Boot-Update" scheduled task is {0}.  Unable to apply "AvailableUpdates" = 0x{1:x}' -f $SecureBoot_TaskState.ToUpper(), $AvailableUpdates
+            'WARNING: "Secure-Boot-Update" scheduled task is {0}.  Unable to apply "AvailableUpdates" = 0x{1:x}' -f $SecureBoot_TaskState.ToString().ToUpper(), $AvailableUpdates
             $Task_Updated = $false
         }
         else {
@@ -1923,7 +1929,7 @@ $ScriptBlock = {
         }
 
         try {
-            $null = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'Update_UEFI-CA2023'
+            $null = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Name 'Update_UEFI-CA2023' -ErrorAction Stop
             "`nRestart Windows, for pending updates to take effect."
         }
         catch {
