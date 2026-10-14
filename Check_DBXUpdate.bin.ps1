@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-$VERSION 2026.09.10
+$VERSION 2026.10.14
 
 .GUID dbcc69b3-3e30-4e71-a1a9-29ef49f06afc
 
@@ -59,7 +59,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.09.10'
+$ScriptVersion = '2026.10.14'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -590,7 +590,13 @@ function Compare-DBXSignatureData {
     $RequiredCount = $RequiredSignatureData.Count
 
     if ($RequiredCount -eq 0) {
-        Write-Host "No DBX signatures in $DBXUpdate_File" -ForegroundColor Red
+        if ($DBXUpdate_File -match 'DBXUpdate2024.bin') {
+            Write-Host "No DBX signatures found in $Filename (removed after October 2026)"
+        }
+        else {
+            Write-Host "No DBX signatures found in $Filename"
+        }
+
         return $null
     }
 
