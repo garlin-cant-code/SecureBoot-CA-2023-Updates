@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.10.14
+.VERSION 2026.11.03
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -84,7 +84,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.10.14'
+$ScriptVersion = '2026.11.03'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1724,6 +1724,11 @@ function Validate-RepairMyPC {
 function Check-CacheFolders {
     try {
         $InstallDir = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Macrium\RescuePE' -Name 'InstallDir' -ErrorAction Stop
+
+        if ($InstallDir -match ':') {
+            $array = $InstallDir -split ':'
+            $InstallDir = '{0}:{1}' -f $array[0].ToUpper(), $array[1]
+        }
     }
     catch {
         $InstallDir = "$env:SystemDrive\boot"
@@ -2307,22 +2312,17 @@ $ScriptBlock = {
             $EFI_SkuSiPolicyVersion = [string](Get-SkuSiPolicyVersion $EFI_SkuSiPolicy_File)
 
             if ($EFI_SkuSiPolicyFile_Hash -eq $SkuSiPolicyFile_Hash) {
-                if ($Verbose) {
-                    '{0}SkuSiPolicy.p7b is CURRENT.' -f $Tab4
-                    "{0}{1}`n{2}Version: {3}" -f $Tab8, $EFI_SkuSiPolicy_File, $Tab8, $EFI_SkuSiPolicyVersion
-                }
-                else {
-                    '{0}SkuSiPolicy.p7b is CURRENT.' -f $Tab4
-                }
+                '{0}SkuSiPolicy.p7b is CURRENT.' -f $Tab4
             }
             else {
-                if ($Verbose) {
-                    '{0}SkuSiPolicy.p7b Version: {1} is WRONG VERSION.' -f $Tab4, $EFI_SkuSiPolicyVersion
-                    "{0}{1}`n{2}Version: {3}" -f $Tab8, $EFI_SkuSiPolicy_File, $Tab8, $EFI_SkuSiPolicyVersion
-                }
-                else {
-                }
-                    '{0}SkuSiPolicy.p7b is WRONG VERSION.' -f $Tab4
+                '{0}SkuSiPolicy.p7b is WRONG VERSION.' -f $Tab4
+            }
+
+            if ($Verbose) {
+                "{0}{1}`n{2}Version: {3}" -f $Tab8, $EFI_SkuSiPolicy_File, $Tab8, $EFI_SkuSiPolicyVersion 
+            }
+            else {
+                '{0}Version: {1}' -f $Tab8, $EFI_SkuSiPolicyVersion
             }
 
             try {
@@ -2476,7 +2476,16 @@ $ScriptBlock = {
             }
         }
 
-        $FixedDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Fixed' -and $_.FileSystem -match 'FAT' -and $_.DeviceID -match '[A-Z]' } | foreach { $_.DeviceID.Substring(0,1) })
+        $FixedDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk | where { $_.Description -match 'Fixed' -and $_.FileSystem -match 'FAT' -and $_.DeviceID -match '[A-Z]' } | foreach {
+            try {
+                $DriveLetter = $_.DeviceID.Substring(0,1)
+
+                $null = Get-Volume $DriveLetter -ErrorAction Stop
+                $DriveLetter
+            }
+            catch {
+            }
+        })
 
         if ($FixedDrives.Count) {
             Print-Header 'Fixed Drives'

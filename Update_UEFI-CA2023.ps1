@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.10.14
+.VERSION 2026.11.03
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -111,7 +111,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.10.14'
+$ScriptVersion = '2026.11.03'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1418,8 +1418,6 @@ $ScriptBlock = {
          default  { $ProductName = 'Windows {0} {1}' -f $(if ($Build -lt 22000) { '10' } else { '11' }), $DisplayVersion }
     }
 
-    $Result = Confirm-MinimumUBR
-
     if ($Result -ne $true) {
         if ($Result -notmatch 'Cannot confirm') {
             "ERROR: $Result.`n"
@@ -1428,6 +1426,13 @@ $ScriptBlock = {
         else {
             "WARNING: $Result.`n"
         }
+    }
+
+    $Result = Confirm-MinimumUBR
+
+    if ($Result -match 'unsupported') {
+        $Result
+        exit 1
     }
 
     try {
