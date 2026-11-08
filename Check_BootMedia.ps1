@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.11.03
+.VERSION 2026.11.08
 
 .GUID ab687543-1a54-4da4-9870-8e8523ea806f
 
@@ -84,7 +84,7 @@ param (
     [string[]]$Paths = @()
 )
 
-$ScriptVersion = '2026.11.03'
+$ScriptVersion = '2026.11.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -2145,6 +2145,18 @@ $ScriptBlock = {
     }
 
     try {
+        $SMPhost_StartType = (Get-Service -Name 'smphost' -ErrorAction Stop).StartType
+
+        if ($SMPhost_StartType -eq 'Disabled') {
+            Set-Service -Name 'smphost' -StartupType Manual
+        }
+    }
+    catch {
+        $_.Exception.Message
+        exit 1
+    }
+
+    try {
         $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
     }
     catch {
@@ -2493,6 +2505,17 @@ $ScriptBlock = {
             foreach ($Drive in $FixedDrives) {
                 Check-DriveVolume -DriveLetter $Drive
             }
+        }
+    }
+
+    if ($SMPhost_StartType -eq 'Disabled') {
+        try {
+            Set-Service -Name 'smphost' -StartupType Disabled
+            Stop-Service -Name 'smphost' -Force
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
         }
     }
 }

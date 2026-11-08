@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.10.14
+.VERSION 2026.11.08
 
 .GUID 240507af-7454-491f-8e42-acb2a40ae3ef
 
@@ -69,7 +69,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.10.14'
+$ScriptVersion = '2026.11.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1194,6 +1194,18 @@ function Run-FiniteStateMachine {
 
 $ScriptBlock = {
     try {
+        $SMPhost_StartType = (Get-Service -Name 'smphost' -ErrorAction Stop).StartType
+
+        if ($SMPhost_StartType -eq 'Disabled') {
+            Set-Service -Name 'smphost' -StartupType Manual
+        }
+    }
+    catch {
+        $_.Exception.Message
+        exit 1
+    }
+
+    try {
         $SecureBoot_TaskState = (Get-ScheduledTask -TaskName 'Secure-Boot-Update' -ErrorAction Stop).State
     }
     catch {
@@ -1587,6 +1599,17 @@ $ScriptBlock = {
             $GUID = (Get-Partition -DiskNumber $SystemDisk | Where-Object { $_.Type -eq 'System' }).Guid
 
             $EFI_Path = '{0}\EFI' -f (Get-HarddiskVolume $GUID)
+        }
+    }
+
+    if ($SMPhost_StartType -eq 'Disabled') {
+        try {
+            Set-Service -Name 'smphost' -StartupType Disabled
+            Stop-Service -Name 'smphost' -Force
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
         }
     }
 
