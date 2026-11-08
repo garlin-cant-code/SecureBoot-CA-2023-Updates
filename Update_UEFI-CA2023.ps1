@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.11.03
+.VERSION 2026.11.08
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -111,7 +111,7 @@ param (
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.11.03'
+$ScriptVersion = '2026.11.08'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -1400,6 +1400,18 @@ function Update-USB_Drive {
 
 $ScriptBlock = {
     try {
+        $SMPhost_StartType = (Get-Service -Name 'smphost' -ErrorAction Stop).StartType
+
+        if ($SMPhost_StartType -eq 'Disabled') {
+            Set-Service -Name 'smphost' -StartupType Manual
+        }
+    }
+    catch {
+        $_.Exception.Message
+        exit 1
+    }
+
+    try {
         $CurrentVersion = Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
     }
     catch {
@@ -1418,20 +1430,10 @@ $ScriptBlock = {
          default  { $ProductName = 'Windows {0} {1}' -f $(if ($Build -lt 22000) { '10' } else { '11' }), $DisplayVersion }
     }
 
-    if ($Result -ne $true) {
-        if ($Result -notmatch 'Cannot confirm') {
-            "ERROR: $Result.`n"
-            exit 1
-        }
-        else {
-            "WARNING: $Result.`n"
-        }
-    }
-
     $Result = Confirm-MinimumUBR
 
     if ($Result -match 'unsupported') {
-        $Result
+        "WARNING: $Result"
         exit 1
     }
 
@@ -1920,6 +1922,17 @@ $ScriptBlock = {
 
                 if ($Media_Updated) { '' }
             }
+        }
+    }
+
+    if ($SMPhost_StartType -eq 'Disabled') {
+        try {
+            Set-Service -Name 'smphost' -StartupType Disabled
+            Stop-Service -Name 'smphost' -Force
+        }
+        catch {
+            $_.Exception.Message
+            exit 1
         }
     }
 
