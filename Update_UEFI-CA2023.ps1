@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 2026.11.08
+.VERSION 2026.11.24
 
 .GUID 7c7848ed-3952-4726-8f23-8644881c2c91
 
@@ -80,6 +80,8 @@ param (
     [switch]$Version,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
     [ValidateScript({ if (Test-Path $_ ) { $true } else { throw "Folder `"$_`" not found." } })]
     [string]$UpdatesFolder = $(if ([Environment]::Is64BitProcess) { "$env:SystemRoot\System32\SecureBootUpdates" } else { "$env:SystemRoot\SysNative\SecureBootUpdates" }),
 
@@ -87,6 +89,8 @@ param (
     [switch]$Audit,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
     [switch]$Force,
 
     [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
@@ -95,23 +99,32 @@ param (
     [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
     [switch]$RevokeNoDBX,
 
-    [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
     [switch]$Latest,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
     [switch]$SkuSiPolicy,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
     [switch]$BootMedia,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default')]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke')]
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX')]
     [switch]$Log,
 
     [Parameter(Mandatory=$false,ParameterSetName='Default',DontShow,ValueFromRemainingArguments=$true)]
+    [Parameter(Mandatory=$false,ParameterSetName='Revoke',DontShow,ValueFromRemainingArguments=$true)]
+    [Parameter(Mandatory=$false,ParameterSetName='RevokeNoDBX',DontShow,ValueFromRemainingArguments=$true)]
     [string[]]$ignored
 )
 
-$ScriptVersion = '2026.11.08'
+$ScriptVersion = '2026.11.24'
 
 # https://github.com/microsoft/secureboot_objects/blob/main/Archived/dbx_info_msft_4_09_24_svns.csv
 $EFI_BOOTMGR_SVN_GUID = '01612B139DD5598843AB1C185C3CB2EB92'
@@ -132,7 +145,7 @@ switch ($Arch) {
     'arm64' { $EDK2_Arch = 'aarch64' }
 }
 
-$EDK2_Version = 'v1.7.0'
+$EDK2_Version = 'v1.7.2'
 $EDK2_bin_URL = "https://github.com/microsoft/secureboot_objects/releases/download/$EDK2_Version/edk2-${EDK2_Arch}-secureboot-binaries.zip"
 
 $PK_DER_URL = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PreSignedObjects/PK/Certificate/WindowsOEMDevicesPK.der'
@@ -1720,15 +1733,62 @@ $ScriptBlock = {
             '{0}System will fail to boot due to a security violation.' -f $Tab4
             exit 1
         }
+    }
 
-        if ($Revoke) {
-            if ($Latest) {
-                $Filename = ($DBXUpdate_SignedByKEK2023_URL -split '/')[-1]
-                $DBXUpdate_bin = "$TEMP_DIR\$Filename"
+    if ($Revoke) {
+        if ($Latest) {
+            $Filename = ($DBXUpdate_SignedByKEK2023_URL -split '/')[-1]
+            $DBXUpdate_bin = "$TEMP_DIR\$Filename"
+
+            try {
+                'Downloading "{0}" from GitHub.' -f $Filename
+                Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_SignedByKEK2023_URL -OutFile $DBXUpdate_bin
+            }
+            catch {
+                $_.Exception.Message
+                exit 1
+            }
+        }
+        else {
+            $DBXUpdate_bin = "$UpdatesFolder\dbxupdate.bin"
+        }
+
+        try {
+            $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
+        }
+        catch {
+            if ($_.Exception.Message -match '0xC0000100') {
+                $DBXSignatureData = $false
+            }
+            else {
+                throw $_.Exception.Message
+            }
+        }
+
+        if (-not $(Match-DBXSignatureData $DBXUpdate_bin)) {
+            Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
+        }
+        elseif ($Latest) {
+            '"{0}" is not a newer version.' -f (Split-Path $DBXUpdate_bin -Leaf)
+        }
+
+        if ($Latest) {
+            Remove-Item $DBXUpdate_bin -Force
+        }
+    }
+
+    if ($Revoke -or $RevokeNoDBX) {
+        if ('Microsoft Windows Production PCA 2011' -notin (Get-UEFICert dbx)) {
+            Append-SecureBootSignedFile -Variable dbx -Filename "$UpdatesFolder\DBXUpdate2024.bin"
+        }
+
+        if ($Latest) {
+            if ((Confirm-MinimumUBR) -eq $true) {
+                $DBXUpdateSVN_bin = "$TEMP_DIR\DBXUpdateSVN.bin"
 
                 try {
-                    'Downloading "{0}" from GitHub.' -f $Filename
-                    Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdate_SignedByKEK2023_URL -OutFile $DBXUpdate_bin
+                    'Downloading "DBXUpdateSVN.bin" from GitHub.'
+                    Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdateSVN_bin_URL -OutFile $DBXUpdateSVN_bin
                 }
                 catch {
                     $_.Exception.Message
@@ -1736,47 +1796,8 @@ $ScriptBlock = {
                 }
             }
             else {
-                $DBXUpdate_bin = "$UpdatesFolder\dbxupdate.bin"
-            }
-
-            try {
-                $DBXSignatureData = (Get-SecureBootUEFI dbx | Get-UEFIDatabaseSignatures).SignatureList.SignatureData
-            }
-            catch {
-                if ($_.Exception.Message -match '0xC0000100') {
-                    $DBXSignatureData = $false
-                }
-                else {
-                    throw $_.Exception.Message
-                }
-            }
-
-            if (-not $(Match-DBXSignatureData $DBXUpdate_bin)) {
-                Append-SecureBootSignedFile -Variable dbx -Filename $DBXUpdate_bin
-            }
-            elseif ($Latest) {
-                '"{0}" is not a newer version.' -f (Split-Path $DBXUpdate_bin -Leaf)
-            }
-
-            if ($Latest) {
-                Remove-Item $DBXUpdate_bin -Force
-            }
-        }
-
-        if ('Microsoft Windows Production PCA 2011' -notin (Get-UEFICert dbx)) {
-            Append-SecureBootSignedFile -Variable dbx -Filename "$UpdatesFolder\DBXUpdate2024.bin"
-        }
-
-        if ($Latest) {
-            $DBXUpdateSVN_bin = "$TEMP_DIR\DBXUpdateSVN.bin"
-
-            try {
-                "Downloading `"DBXUpdateSVN.bin`" from GitHub.`n"
-                Invoke-WebRequest -UseBasicParsing -Uri $DBXUpdateSVN_bin_URL -OutFile $DBXUpdateSVN_bin
-            }
-            catch {
-                $_.Exception.Message
-                exit 1
+                "Skipping download of `"DBXUpdateSVN.bin`" from GitHub.  System doesn't have the minimum required version of the Windows boot manager.`n"
+                $DBXUpdateSVN_bin = "$UpdatesFolder\DBXUpdateSVN.bin"
             }
         }
         else {
